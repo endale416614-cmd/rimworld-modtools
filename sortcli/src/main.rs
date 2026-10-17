@@ -20,19 +20,54 @@ struct Args {
     config: Option<PathBuf>,
     out: Option<PathBuf>,
     json: Option<PathBuf>,
+    problems_json: Option<PathBuf>,
+    problems: bool,
+    no_sort: bool,
+    version_warnings: bool,
+    /// `--patches [FILE]`: `Some(None)` prints to stdout.
+    patches: Option<Option<PathBuf>>,
+    patches_json: Option<PathBuf>,
+    overlaps: Option<String>,
 }
 
 fn args() -> Result<Args, String> {
     let mut found = Args::default();
-    let mut it = std::env::args_os().skip(1);
+    let mut it = std::env::args_os().skip(1).peekable();
     while let Some(flag) = it.next() {
         let flag = flag.to_string_lossy().into_owned();
+        match flag.as_str() {
+            "--patches" => {
+                let file = it.next_if(|v| !v.to_string_lossy().starts_with("--"));
+                found.patches = Some(file.map(PathBuf::from));
+                continue;
+            }
+            "--overlaps" => {
+                let v = it.next().ok_or("--overlaps needs a packageId")?;
+                found.overlaps = Some(v.to_string_lossy().into_owned());
+                continue;
+            }
+            "--problems" => {
+                found.problems = true;
+                continue;
+            }
+            "--version-warnings" => {
+                found.version_warnings = true;
+                continue;
+            }
+            "--no-sort" => {
+                found.no_sort = true;
+                continue;
+            }
+            _ => {}
+        }
         let slot = match flag.as_str() {
             "--game" => &mut found.game,
             "--workshop" => &mut found.workshop,
             "--config" => &mut found.config,
             "--out" => &mut found.out,
             "--json" => &mut found.json,
+            "--problems-json" => &mut found.problems_json,
+            "--patches-json" => &mut found.patches_json,
             other => return Err(format!("unknown argument {other}")),
         };
         let value = it.next().ok_or(format!("{flag} needs a value"))?;
@@ -131,6 +166,120 @@ fn diagnose(library: &library::Library, mods: &[Mod], paths: &paths::Paths) {
             m.source, m.kinds, m.code.facts, dependents.len(), unique.len(), active_deps, first.join(", ")
         );
     }
+}
+
+struct Found {
+    kind: &'static str,
+    id: String,
+    words: String,
+}
+
+/// The active list's problems as the app shows them: `describe::troubles` (needs, incompatible,
+/// game version, not installed) with your notes' ignores and trusts applied, broken rules of
+/// `ordering::all_rules`, mods with several installed copies, and `conflicts::overlaps` textures.
+fn problems(
+    library: &library::Library,
+    mods: &[Mod],
+    rules: &[rimstack_core::mods::rules::Rule],
+    active: &HashSet<String>,
+    settings: &Settings,
+    data_dir: &std::path::Path,
+    force_versions: bool,
+) -> Vec<Found> {
+    use rimstack_core::mods::describe::{self, Fix, Versions};
+    use rimstack_core::mods::{checks, conflicts};
+    use rimstack_core::rimworld::{id, workshopdb};
+    use std::collections::HashMap;
+
+    let notes = Notes::read(&data_dir.join("notes.json"));
+    // As `Trust::read` in the app.
+    let off = !force_versions && !checks::version_warnings_shown(
+        !settings.switch(Switch::VersionWarnings),
+        settings.get("versionAsideFor"),
+        &library.game_version,
+    );
+    let mut trusted =
+        community::read_works_on(&community::works_on_file(data_dir, &library.game_version));
+    trusted.extend(notes.version_ok().map(String::from));
+    let versions = if off { Versions::Ignored } else { Versions::CheckedBut(&trusted) };
+    let ignored: HashMap<String, HashSet<String>> = notes
+        .ignored()
+        .map(|(id, keys)| (id.to_string(), keys.iter().cloned().collect()))
+        .collect();
+    let names = workshopdb::read(&workshopdb::file_in(data_dir));
+    let mut troubles = describe::troubles(library, mods, versions, &names);
+    describe::without_ignored(&mut troubles, mods, &ignored);
+
+    let mut out = Vec::new();
+    for (m, own) in mods.iter().zip(&troubles) {
+        for t in own {
+            let kind = match (&t.fix, t.key.as_str()) {
+                (Fix::Trust, _) => "GAME_VERSION",
+                (_, "missing") => "NOT_INSTALLED",
+                (_, k) if k.starts_with("not-with:") => "INCOMPATIBLE",
+                _ => "MISSING_DEPENDENCY",
+            };
+            out.push(Found { kind, id: m.id.clone(), words: t.words.to_string() });
+        }
+    }
+
+    for r in rules.iter().filter(|r| r.broken()) {
+        let words = format!(
+            "{} [{:?}; sits at {} but belongs before {} at {}]",
+            describe::rule(r, mods),
+            r.kind,
+            r.first + 1,
+            mods[r.then].id,
+            r.then + 1
+        );
+        out.push(Found { kind: "RULE_VIOLATED", id: mods[r.first].id.clone(), words });
+    }
+
+    let mut copies: HashMap<String, Vec<&library::Installed>> = HashMap::new();
+    for i in &library.installed {
+        if let Some(key) = i.key() {
+            copies.entry(key).or_default().push(i);
+        }
+    }
+    for m in mods.iter().filter(|m| m.installed.is_some()) {
+        let key = id::split_steam(&m.id).0;
+        let Some(same) = copies.get(&key).filter(|c| c.len() > 1) else { continue };
+        let at: Vec<String> = same.iter().map(|i| format!("{} [{}]", i.folder, i.source_label())).collect();
+        out.push(Found {
+            kind: "DUPLICATE_PACKAGE_ID",
+            id: m.id.clone(),
+            words: format!("{} installed copies: {}", same.len(), at.join(", ")),
+        });
+    }
+
+    let installed = |m: &Mod| m.installed.and_then(|i| library.get(i));
+    let provided: Vec<Vec<String>> = mods
+        .par_iter()
+        .map(|m| match installed(m) {
+            Some(found) => conflicts::provided(&loadfolders::folders(&found.path, &library.game_version, &|k| active.contains(k))),
+            None => Vec::new(),
+        })
+        .collect();
+    let overlaps = conflicts::overlaps(&provided);
+    for (a, ma) in mods.iter().enumerate() {
+        for (b, count) in overlaps.with(a).into_iter().filter(|(b, _)| *b > a) {
+            let folder = |m: &Mod| installed(m).map_or(String::new(), |i| i.folder.to_string());
+            let example = provided[a].iter().find(|t| provided[b].binary_search(t).is_ok());
+            out.push(Found {
+                kind: "TEXTURE_CONFLICT",
+                id: ma.id.clone(),
+                words: format!(
+                    "{count} textures shared with {} ({} vs {}); {} loads later and wins; e.g. {}",
+                    mods[b].id,
+                    folder(ma),
+                    folder(&mods[b]),
+                    mods[b].id,
+                    example.map_or("", String::as_str)
+                ),
+            });
+        }
+    }
+    out
 }
 
 fn run() -> Result<(), String> {
@@ -285,14 +434,104 @@ fn run() -> Result<(), String> {
         })
         .collect();
 
-    println!(
-        "active={} moved={} rules={}",
-        before.len(),
-        moves.len(),
-        found.len()
-    );
-    for (id, from, to, why) in &moves {
-        println!("{from} -> {to}  {id}  | {why}");
+    if !args.no_sort {
+        println!(
+            "active={} moved={} rules={}",
+            before.len(),
+            moves.len(),
+            found.len()
+        );
+        for (id, from, to, why) in &moves {
+            println!("{from} -> {to}  {id}  | {why}");
+        }
+    }
+
+    if args.problems || args.problems_json.is_some() {
+        let all = problems(&library, &mods, &found, &active, &settings, &data_dir, args.version_warnings);
+        if args.problems {
+            for p in &all {
+                println!("{}  {}  | {}", p.kind, p.id, p.words);
+            }
+        }
+        if let Some(file) = &args.problems_json {
+            let list: Vec<_> = all
+                .iter()
+                .map(|p| serde_json::json!({"kind": p.kind, "packageId": p.id, "words": p.words}))
+                .collect();
+            let text = serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?;
+            std::fs::write(file, text).map_err(|e| format!("{}: {e}", file.display()))?;
+        }
+    }
+
+    if args.patches.is_some() || args.patches_json.is_some() || args.overlaps.is_some() {
+        // (packageId, kind, "Type.Method"): `kind` is `harmony:<prefix+postfix..>` when core saw a
+        // patch kind (attribute or hand-applied), `call` for a bare AccessTools-style lookup.
+        let mut aims: Vec<(String, String, String)> = Vec::new();
+        for m in &mods {
+            let Some(found) = installed(m) else { continue };
+            for a in &found.code.aims {
+                let d = a.does;
+                let parts: Vec<&str> = [
+                    (d.prefix, "prefix"),
+                    (d.postfix, "postfix"),
+                    (d.transpiler, "transpiler"),
+                    (d.finalizer, "finalizer"),
+                ]
+                .iter()
+                .filter(|(on, _)| *on)
+                .map(|(_, n)| *n)
+                .collect();
+                let kind = if parts.is_empty() { "call".to_string() } else { format!("harmony:{}", parts.join("+")) };
+                aims.push((m.id.clone(), kind, format!("{}.{}", a.target, a.method)));
+            }
+        }
+        let write = |file: &PathBuf, text: String| {
+            std::fs::write(file, text).map_err(|e| format!("{}: {e}", file.display()))
+        };
+        if let Some(to) = &args.patches {
+            let text: String = aims.iter().map(|(p, k, t)| format!("{p}\t{k}\t{t}\n")).collect();
+            match to {
+                Some(file) => write(file, text)?,
+                None => print!("{text}"),
+            }
+        }
+        if let Some(file) = &args.patches_json {
+            let list: Vec<_> = aims
+                .iter()
+                .map(|(p, k, t)| serde_json::json!({"packageId": p, "kind": k, "target": t}))
+                .collect();
+            write(file, serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?)?;
+        }
+        if let Some(want) = &args.overlaps {
+            if !mods.iter().any(|m| m.id.eq_ignore_ascii_case(want)) {
+                return Err(format!("{want} is not in the active list"));
+            }
+            let mut by_target: std::collections::BTreeMap<&str, Vec<(&str, &str)>> = Default::default();
+            for (p, k, t) in &aims {
+                by_target.entry(t).or_default().push((p, k));
+            }
+            let mut mine = 0;
+            let mut shared: Vec<(&str, Vec<String>)> = Vec::new();
+            for (target, who) in &by_target {
+                if !who.iter().any(|(p, _)| p.eq_ignore_ascii_case(want)) {
+                    continue;
+                }
+                mine += 1;
+                let others: Vec<String> = who
+                    .iter()
+                    .filter(|(p, _)| !p.eq_ignore_ascii_case(want))
+                    .map(|(p, k)| format!("{p} ({k})"))
+                    .collect();
+                if !others.is_empty() {
+                    shared.push((target, others));
+                }
+            }
+            shared.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
+            for (target, others) in &shared {
+                println!("{target}\t{}", others.join(", "));
+            }
+            println!("targets={mine} shared={}", shared.len());
+        }
     }
 
     if let Some(out) = &args.out {

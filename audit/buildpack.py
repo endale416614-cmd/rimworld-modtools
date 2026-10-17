@@ -50,7 +50,7 @@ def copy_mod(pid,src,dst):
     keep,vers=keep_version_dirs(src); n=0; b=0
     for dp,dn,fn in os.walk(src):
         rel=os.path.relpath(dp,src); top=rel.split(os.sep)[0]
-        if top=='Source' or (top in vers and top not in keep): dn[:]=[]; continue
+        if top in ('Source','.git') or (top in vers and top not in keep): dn[:]=[]; continue
         for f in fn:
             if (pid,f) in SKIP_FILES and rel=='.': continue
             s=os.path.join(dp,f); d=os.path.join(dst,rel,f)
