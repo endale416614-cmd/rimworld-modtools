@@ -1,0 +1,7 @@
+__pycache__/
+obj/
+bin/
+out/
+*.log
+runs/
+target/
