@@ -1,0 +1,16 @@
+[package]
+name = "rimstack-sortcli"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "rimstack-sortcli"
+path = "src/main.rs"
+
+[dependencies]
+rimstack-core = { path = "../core" }
+rayon = "1"
+serde_json = "1"
+dunce = "1"

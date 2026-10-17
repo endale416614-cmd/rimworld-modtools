@@ -42,3 +42,7 @@ Headless port of RimStack's Sort, built as `crates/sortcli` inside the RimStack 
 
 - RimStack 1.0.1 (TheForgotten69/RimStack, GPL-3.0): extracted at `F:\Rimworld Mod\RimStack\app`, source clone at `F:\Rimworld Mod\RimStack\src`. Unsigned binary from GitHub Releases.
 - RimSort at `F:\Rimsort`: rewrites ModsConfig.xml whenever it is open; close it before scripted edits.
+
+### sortcli/ contents
+
+Copy of `crates/sortcli` (package `rimstack-sortcli`, GPL-3.0 like RimStack). It only builds inside the RimStack workspace: copy it back to `F:\Rimworld Mod\RimStack\src\crates\sortcli`, add `"crates/sortcli"` to the root `Cargo.toml` members, then `cargo build -p rimstack-sortcli --release`. Usage: `rimstack-sortcli --game DIR --workshop DIR --config DIR [--out FILE] [--json FILE]`; prints `active=N moved=M rules=R` then one line per move with its reason. `RIMSTACK_SORTCLI_SOURCES=1` adds stderr diagnostics (which copy of each mod was used, game code path, category counts). Verified 2026-10-17 on 803 mods: same set in and out, idempotent, uses local `NN-pack__` copies over workshop duplicates, applies `%LOCALAPPDATA%\RimStack\communityRules.json` when RimStack has downloaded it.
