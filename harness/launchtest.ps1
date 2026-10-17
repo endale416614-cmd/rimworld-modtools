@@ -52,7 +52,7 @@ $runDir = $null
 try {
     # 1
     $step = '1 preflight'
-    if (@(Get-Process -Name 'RimSort' -ErrorAction SilentlyContinue).Count -gt 0) { throw 'RimSort is running; refusing (it rewrites ModsConfig.xml).' }
+    if (@(Get-Process -Name 'RimSort','rimstack' -ErrorAction SilentlyContinue).Count -gt 0) { throw 'RimSort or RimStack is running; refusing (both rewrite ModsConfig.xml).' }
     if ((Get-Game).Count -gt 0) { throw 'RimWorld is already running; refusing.' }
     if (-not (Test-Path -LiteralPath $gameExe)) { throw "Missing $gameExe" }
 

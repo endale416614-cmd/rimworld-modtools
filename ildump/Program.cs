@@ -90,11 +90,11 @@ foreach (var mh in md.MethodDefinitions)
 {
     var m = md.GetMethodDefinition(mh);
     var mn = md.GetString(m.Name);
-    bool hit = names.Contains(mn);
+    bool hit = names.Contains(mn) || names.Contains("*");
     if (!hit && m.RelativeVirtualAddress != 0)
     {
         var d = Dump(m);
-        foreach (var t in targets) 
+
     }
     if (hit) { Console.WriteLine($"=== {TypeName(m.GetDeclaringType())}::{mn}"); Console.WriteLine(Dump(m)); }
 }
