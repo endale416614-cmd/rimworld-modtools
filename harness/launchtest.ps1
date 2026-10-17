@@ -92,7 +92,7 @@ try {
         }
         if ($st.marker) { $stopReason = 'marker'; break }
         if ((Get-Game).Count -eq 0) { $stopReason = 'process_exited'; break }
-        if ($st.fresh -and $st.verse -and (($el - $lastChange) -ge 600)) { $stopReason = 'fallback_idle_600s'; break }
+        if ($st.fresh -and $st.verse -and (($el - $lastChange) -ge 300)) { $stopReason = 'fallback_idle_300s'; break }
         if ($el -ge $hardTimeoutSec) { $stopReason = 'timeout_30min'; break }
     }
     $elapsedAtStop = [int]$sw.Elapsed.TotalSeconds
