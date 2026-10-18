@@ -1,12 +1,13 @@
 """Make the LocalPack 1.7 installer from the Homebrew 1.7 installer .bat (output of hb17installer.py).
-Only the script part before the ##PAYLOAD line is edited; the embedded tools zip after it is copied unchanged.
+The script part before ##PAYLOAD is edited by exact replacements; the embedded tools zip after it is re-packed with
+rebranded tool .bats and the LocalPack README.
 Every replacement must match exactly the expected number of times, so a changed installer fails loudly.
 The C# helper namespace (HomebrewModpackSetup) is internal and kept.
-  py -I lp17installer.py HOMEBREW17.bat OUT.bat BUILDSTAMP RETIRED_IDS_COMMA_SEPARATED
+  py -I lp17installer.py HOMEBREW17.bat OUT.bat BUILDSTAMP RETIRED_IDS_COMMA_SEPARATED README.txt
 """
 import re, sys
 
-src, dst, stamp, retired = sys.argv[1:5]
+src, dst, stamp, retired, readme = sys.argv[1:6]
 data = open(src, 'rb').read()
 cut = data.index(b'\n##PAYLOAD') + 1
 head, tail = data[:cut].decode('utf-8'), data[cut:]
@@ -28,6 +29,21 @@ R = [
     ('double-click "Install Homebrew Modpack" there.', 'double-click "Install LocalPack" there.', 1),
     ("(the 'Install Homebrew Modpack' file)", "(the 'Install LocalPack' file)", 1),
 ]
+# The extractor counted and hashed every written file, while Util.Measure/TreeHash skip a .dds next to a same-name
+# picture. Homebrew shipped no such twins; LocalPack has 1,846 author-made ones. Make the extractor skip them too.
+SORT = '                    lines.Sort(delegate (KeyValuePair<string, string> a, KeyValuePair<string, string> b) { return string.CompareOrdinal(a.Key, b.Key); });'
+TWINS = '\r\n'.join([
+    '                    // LocalPack: skip .dds twins exactly like Util.Measure/TreeHash (the files are still written)',
+    '                    HashSet<string> rels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);',
+    '                    foreach (KeyValuePair<string, string> kv in lines) rels.Add(kv.Key);',
+    '                    HashSet<string> twins = new HashSet<string>(StringComparer.OrdinalIgnoreCase);',
+    '                    foreach (string k in rels)',
+    '                        if (k.EndsWith(".dds", StringComparison.OrdinalIgnoreCase))',
+    '                            foreach (string x in new string[] { ".png", ".jpg", ".jpeg", ".psd" }) if (rels.Contains(k.Substring(0, k.Length - 4) + x)) { twins.Add(k); break; }',
+    '                    foreach (ZipArchiveEntry z in list) if (twins.Contains(z.FullName.Substring(5 + folder.Length + 1))) fbytes -= z.Length;',
+    '                    lines.RemoveAll(delegate (KeyValuePair<string, string> kv) { return twins.Contains(kv.Key); });',
+    ''])
+R.append((SORT, TWINS + SORT, 1))
 for a, b, n in R:
     c = head.count(a)
     if c != n: sys.exit(f'expected {n} match(es), found {c}: {a}')
@@ -36,5 +52,28 @@ head, k = re.subn(r"^\$RetiredIds = @\([^\r\n]*\)(?=\r?$)", lambda m: f"$Retired
 if k != 1: sys.exit(f'RetiredIds line matched {k} times')
 left = [l for l in head.splitlines() if re.search(r'homebrew', l, re.I) and 'HomebrewModpackSetup' not in l]
 if left: sys.exit('unreplaced Homebrew text:\n' + '\n'.join(left))
+
+# The payload is a base64 zip of the Desktop tools (Undo last update, Send bug report, README). They carry the same
+# product/tool-folder names, so rebrand them too and swap in the LocalPack README (argument 5).
+import base64, io, zipfile
+b64 = b''.join(tail[len(b'##PAYLOAD'):].split())
+zin = zipfile.ZipFile(io.BytesIO(base64.b64decode(b64)))
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+    for info in zin.infolist():
+        data = zin.read(info)
+        if info.filename.lower().startswith('tools/readme'):
+            info.filename = 'tools/README - LocalPack.txt'; data = open(readme, 'rb').read()
+        elif info.filename.lower().endswith('.bat'):
+            t = data.decode('utf-8')
+            for a, b in (('Homebrew-Modpack', 'LocalPack'), ('Homebrew Modpack', 'LocalPack'), ('HomebrewPackCore', 'LocalPackCore')):
+                t = t.replace(a, b)
+            t = re.sub(r'HomebrewModpack(?!Setup)', 'LocalPack', t)
+            bad = [l for l in t.splitlines() if re.search(r'homebrew', l, re.I) and 'HomebrewModpackSetup' not in l]
+            if bad: sys.exit(f'unreplaced Homebrew text in {info.filename}:\n' + '\n'.join(bad))
+            data = t.encode('utf-8')
+        zout.writestr(info, data)
+enc = base64.b64encode(buf.getvalue())
+tail = b'##PAYLOAD\r\n' + b''.join(enc[i:i + 120] + b'\r\n' for i in range(0, len(enc), 120))
 open(dst, 'wb').write(head.encode('utf-8') + tail)
-print('ok', dst, 'build', stamp, 'retired', ids)
+print('ok', dst, 'build', stamp, 'retired', ids, 'tools', [i.filename for i in zipfile.ZipFile(buf).infolist()])
