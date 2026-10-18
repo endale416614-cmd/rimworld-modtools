@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <GameDir Condition="'$(GameDir)' == ''">F:\Steam\steamapps\common\RimWorld</GameDir>
+  </PropertyGroup>
+  <!-- the game's own copies (AssetsTools.NET by nesrak1, MIT; AssetRipper.TextureDecoder, MIT) -->
+  <ItemGroup>
+    <Reference Include="AssetsTools.NET"><HintPath>$(GameDir)\AssetsTools.NET.dll</HintPath></Reference>
+    <Reference Include="AssetsTools.NET.Texture"><HintPath>$(GameDir)\AssetsTools.NET.Texture.dll</HintPath></Reference>
+    <Reference Include="AssetRipper.TextureDecoder"><HintPath>$(GameDir)\AssetRipper.TextureDecoder.dll</HintPath></Reference>
+  </ItemGroup>
+</Project>

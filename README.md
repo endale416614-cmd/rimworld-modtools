@@ -36,6 +36,40 @@ Known limits: `packs.py` regexes and `OVER` are tuned to one specific list; `rep
 
 `Install LocalPack.bat`: installer that ships inside a built pack folder (next to `Mods\` and `ModsConfig.xml`). Backs up the live ModsConfig.xml, moves older `NN-pack__*` folders to `<RimWorld>\LocalPack\Backups\<stamp>`, copies the pack's mods into `<RimWorld>\Mods`, installs the pack's ModsConfig.xml.
 
+### Homebrew Modpack for 1.7 (`hb17*.py`)
+
+The Homebrew pack (HBP_* folders with `Members/`) needs Pack Core, which needs Prepatcher, which is Mono-only and cannot run on Waylith/.NET 10. These scripts rebuild the pack's data as plain mod folders; see the docstring of each. Order:
+
+1. `hb17build.py flatten SRC OUT bundlex.exe`: SRC = extracted `Modpack-v1.7.data.zip`. Workshop members and workshop `keep` folders come from the current workshop copy (slimmed, `.dds` twins left out); local members come from the pack, with a LoadFolders.xml rebuilt from the pack's, and their textures decoded from the pack's BC7 bundle. `DROP` lists the mods left out and why. Writes `OUT/BUILD-LOG.txt`.
+2. `refcheck` on `OUT/Mods`, then `patch17` on whatever it flags, then `tag17.py OUT/Mods --apply`. Move every `*.pre17` out of OUT before zipping.
+3. `hb17build.py release SRC OUT "1.7.4981 rev136"`: ModsConfig.xml (Pack Core's LoadOrder.txt minus DROP), settings files of kept folders, `release.json` (files/bytes/treeHash/dlls computed exactly like the installer's `Util.Measure`/`TreeHash`, checked against the original release).
+4. `hb17installer.py IN.bat OUT.bat GAMEBUILD STAMP`: installer for 1.7 (RimWorld.exe, game version, retired ids); the base64 payload after `##PAYLOAD` is kept byte for byte.
+5. `hb17readme.py IN OUT INSTALL_GB EXTRACT_GB` and `hb17zip.py BUILD OUT.zip` (verifies config and DLL hashes in the zip).
+
+### LocalPack release (`lp17*.py`)
+
+The LocalPack ships in the same format as the Homebrew 1.7 build (installer .bat + data zip + README), with the tested live load order and the mods in category-prefixed folders (`NN-category__packageid`).
+
+1. `lp17release.py PACK OUT CONFIGDIR "GAMEBUILD"`: PACK = `F:\Rimworld Mod\LocalPack-v1.7` (a git repo), CONFIGDIR = the Config folder whose ModsConfig.xml was launch-tested. Asserts that the pack folders and the load order match one-to-one and that every folder name matches its About.xml packageId. Hard-links Mods into OUT without `*.orig`/`*.pre17`, copies ModsConfig.xml and the settings files of shipped folders (skips FasterGameLoading's cache and any file holding a local path), writes `release.json` (installer schema plus `packs` categories and each entry's `category`), `LoadOrder.txt`, `CATEGORIES.txt`.
+2. `hb17zip.py OUT LocalPack-v1.7.data.zip`.
+3. `lp17installer.py "Install Homebrew Modpack.bat" "Install LocalPack.bat" STAMP RETIRED_IDS`: rebrands the Homebrew 1.7 installer (product name, tool folder `<RimWorld>\LocalPack`, data zip name, retired ids); every replacement must match exactly, and no Homebrew text may remain.
+
+Headless installer test: `HBM_ACTION=install HBM_YES=1 HBM_TEST=1 HBM_GAME_DIR=<stub> HBM_CONFIG_DIR=<dir> HBM_DESKTOP_DIR=<dir>`; a stub game folder needs only `Version.txt`, a `RimWorld.exe` file and `Data\<DLC>\About\About.xml`.
+
+## refcheck/ - static 1.7 compatibility check
+
+`refcheck --game <RimWorld> --out FILE.json [--active PACKAGEIDS.txt] [--lib DIR]... MODROOT...` resolves every TypeRef and MemberRef (full signature, base-type chain, type forwarders) of every mod DLL the game would load on 1.7 (LoadFolders-aware, later entries win same-name ties) against the game's assemblies (Unity module refs map to `UnityStubs.dll`) and the other mods' DLLs. Each unresolved reference would throw TypeLoad/MissingMethod/MissingField when its caller is compiled. `--lib` adds assemblies that load before every mod (e.g. a replacement Harmony). Known false positives: the ILRepacked `0Harmony.dll` (Harmony 3) and MessagePack's `AssemblyBuilder.Save`; `MissingAssembly` hits are optional compat code for absent mods. It cannot see Harmony patch targets named by string, reflection by name, or IL the runtime rejects (use the harness for those).
+
+## patch17/ - IL patches for 1.6 DLLs on 1.7
+
+`patch17 IN.dll OUT.dll [--ref DIR]...` (Mono.Cecil 0.11.6) rewrites only the instructions that refcheck flagged, one rule each: `List.EnsureCapacity` void to int + pop, `Emit.Label.label` to `box` + `GetHashCode()`, `TerrainDef.holdSnow` to `holdSnowOrSand`, `Widgets.ThingIcon` 5 to 7 args (defaults), `Input.ResetInputAxes` to nop, Harmony 2's `DefaultInterpolatedStringHandler` polyfill to `System.Runtime`, Replace Stuff's removed `NewThingDefOf` to an injected `[DefOf]` class. Also (whole-method rule) Graphics Settings+'s `LoadTexture_Patch.Prefix`: falls back to vanilla when the file is not on disk or its custom load fails (1.7 DLC textures are in `Assets.zip` content packs). Mod-specific bug-fix rules (2026-10-18, RW-MOD-013; details in the pack's FIXES-dll.md): More Vanilla Mechanoid field lookup walks base types (injected `FindField`), UsefulMarks looks for `ColoredMoodBar17`, Isekai Leveling uses `AccessTools.DeclaredMethod` for MindWipe.Cast, Eccentric Projectiles hooks every `DrawEquipmentAiming` call (Dual Wield adds one). `--scos FILE` adds `[Verse.StaticConstructorOnStartup]` to the types listed in FILE (`scos17.txt`: 37 types whose static constructors were checked to be safe after defs load). `UnityEngine.*` assembly refs resolve to `UnityStubs.dll`, as in the game. Applied 2026-10-18 to Adaptive Storage Framework, SpeakUp, PowerTab, Choose Your Outfit, Fortification Medieval and Replace Stuff Compatibility in both LocalPack copies (`.pre17` backups next to each DLL); harness run 20261018_131258 PASS, 0 errors.
+
+## bundlex/ - Unity bundle texture export
+
+`bundlex BUNDLE OUTDIR [NAMES.txt]` writes each Texture2D of an AssetBundle as PNG under its container path. It uses the game's own `AssetsTools.NET`, `AssetsTools.NET.Texture` and `AssetRipper.TextureDecoder` (HintPaths into the RimWorld folder, so no NuGet packages) and a built-in PNG writer.
+
+`.config/dotnet-tools.json` pins ilspycmd 9.1.0.7988 (`dotnet ilspycmd`); 11.x needs the .NET 10 SDK.
+
 ## rimstack-sortcli (separate)
 
 Headless port of RimStack's Sort, built as `crates/sortcli` inside the RimStack source clone at `F:\Rimworld Mod\RimStack\src` (GPL-3.0, so it stays with that source). Copied here under `sortcli/` once finished. Build: `cargo build -p rimstack-sortcli --release` with the Rust toolchain in `%USERPROFILE%\.cargo\bin`.

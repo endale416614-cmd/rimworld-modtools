@@ -17,7 +17,7 @@ if '--keep-after' in sys.argv:
     keep_after = datetime.datetime.strptime(sys.argv[sys.argv.index('--keep-after') + 1], '%Y-%m-%d %H:%M').timestamp()
 # Settings files that are really caches tied to the installed mod set; migrating them replays a stale cache.
 SKIP_CLASSES = ('FasterGameLoadingMod',)
-entries = [e for e in json.load(open(rel, encoding='utf-8'))['entries'] if e.get('kind') == 'mod' and e.get('workshopId', '').isdigit()]
+entries = [e for e in json.load(open(rel, encoding='utf-8'))['entries'] if e.get('kind') in ('mod', 'keep') and e.get('workshopId', '').isdigit()]
 by_id = {e['workshopId']: e['folder'] for e in entries}
 files = os.listdir(cfg)
 plan = []
