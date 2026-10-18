@@ -32,6 +32,8 @@ Known limits: `packs.py` regexes and `OVER` are tuned to one specific list; `rep
 
 ## pack/
 
+`tag17.py MODSDIR [MODSDIR...] [--apply]`: marks local forks as 1.7 by adding `<li>1.7</li>` to About.xml `supportedVersions`. Dry run by default; `--apply` keeps `<file>.pre17` backups (never overwritten) and skips any edit that would not parse. Metadata only: it does not recompile DLLs. Run with no arguments for its self-check. It does not touch LoadFolders.xml: copying the newest entry as `v1.7` was tried on 2026-10-18 and stalled the launch about 5 min before Harmony loaded, and it changed what loaded (new ShowMeYourHands and YART warnings); without a `v1.7` entry the game falls back to the newest older entry, which is the tested path. Applied 2026-10-18 to both `F:\Rimworld Mod\LocalPack-v1.7\Mods` and `<RimWorld>\Mods` (461 About.xml each); harness run 20261018_121325 PASS, 0 errors.
+
 `Install LocalPack.bat`: installer that ships inside a built pack folder (next to `Mods\` and `ModsConfig.xml`). Backs up the live ModsConfig.xml, moves older `NN-pack__*` folders to `<RimWorld>\LocalPack\Backups\<stamp>`, copies the pack's mods into `<RimWorld>\Mods`, installs the pack's ModsConfig.xml.
 
 ## rimstack-sortcli (separate)
