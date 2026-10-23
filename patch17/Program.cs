@@ -120,6 +120,22 @@ foreach (var m in module.GetTypes().SelectMany(t => t.Methods).Where(m => m.HasB
     Hit("EccentricProjectiles: hook every DrawEquipmentAiming call");
 }
 
+// Deep Swimming: Waylith runs Unity shaders only from a bundle's Vulkan programs. BundleFor's default branch picks the Windows
+// bundle (D3D11 only), which ApiFitsBundle rejects on Vulkan, so the mod falls back. Use the _linux bundle (OpenGLCore + Vulkan
+// programs) and accept any graphics API.
+var dsAssets = module.GetType("DeepSwimming.DeepSwimmingAssets");
+var dsBundle = dsAssets?.Methods.FirstOrDefault(m => m.Name == "BundleFor" && m.HasBody);
+if (dsBundle != null)
+    foreach (var i in dsBundle.Body.Instructions.Where(i => i.OpCode == OpCodes.Ldstr && (string)i.Operand == "deepswimming"))
+    { i.Operand = "deepswimming_linux"; Hit("DeepSwimming BundleFor default -> deepswimming_linux"); }
+var dsApi = dsAssets?.Methods.FirstOrDefault(m => m.Name == "ApiFitsBundle" && m.HasBody);
+if (dsApi != null && dsApi.Body.Instructions[0].OpCode != OpCodes.Ldc_I4_1)
+{
+    var dil = dsApi.Body.GetILProcessor(); var first = dsApi.Body.Instructions[0];
+    dil.InsertBefore(first, dil.Create(OpCodes.Ldc_I4_1)); dil.InsertBefore(first, dil.Create(OpCodes.Ret));
+    Hit("DeepSwimming ApiFitsBundle -> true");
+}
+
 // --scos FILE: add [Verse.StaticConstructorOnStartup] to the listed types (one full name per line, # comments) so vanilla
 // runs their static constructors on the main thread at startup (fixes the dev-mode "probably needs a
 // StaticConstructorOnStartup attribute" report). The list must only hold types whose .cctor is safe after defs load.
@@ -175,6 +191,14 @@ foreach (var type in module.GetTypes().ToList())
                     il.InsertAfter(ins, call);
                     il.InsertAfter(ins, il.Create(OpCodes.Ldc_I4_0));
                     Hit("Widgets.ThingIcon 5 -> 7 args");
+                }
+                // UnityStubs' Object.hideFlags is set-only and its setter just logs "Stub!"; pop receiver and value (same stack effect)
+                else if (dt == "UnityEngine.Object" && m.Name == "set_hideFlags")
+                {
+                    if (ins.Previous?.OpCode == OpCodes.Constrained) throw new Exception($"{method.FullName}: constrained. prefix on set_hideFlags");
+                    ins.OpCode = OpCodes.Pop; ins.Operand = null;
+                    il.InsertAfter(ins, il.Create(OpCodes.Pop));
+                    Hit("Object.hideFlags setter -> pop pop");
                 }
             }
             else if (ins.Operand is FieldReference f)

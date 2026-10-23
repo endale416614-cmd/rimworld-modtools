@@ -1,4 +1,5 @@
 # RimWorld launch-test harness. Windows PowerShell 5.1. Load test only: kills the game at the end.
+param([int]$SettleSec = 20)
 $ErrorActionPreference = 'Stop'
 $step = 'init'
 $exitCode = 2
@@ -43,8 +44,8 @@ function Read-NewLog {
     $st.off += $last + 1
     foreach ($l in ($text -split "`n")) {
         if ($l -match $errRx) { $st.errs++ }
-        if ($l.Contains('[GUIPerf]') -and $l.Contains('RimWorld 1.7.4981 rev136')) { $st.marker = $true }
-        if ($l.Contains('[Verse] RimWorld 1.7.4981 rev136')) { $st.verse = $true }
+        if ($l.Contains('[GUIPerf]') -and ($l -match 'RimWorld 1\.7\.\d+ rev\d+')) { $st.marker = $true }
+        if ($l -match '\[Verse\] RimWorld 1\.7\.\d+ rev\d+') { $st.verse = $true }
     }
 }
 
@@ -100,7 +101,7 @@ try {
 
     # 6
     $step = '6 settle and stop'
-    if ($stopReason -ne 'process_exited') { Start-Sleep -Seconds 20 }
+    if ($stopReason -ne 'process_exited') { Start-Sleep -Seconds $SettleSec }
     $procs = Get-Game
     foreach ($p in $procs) { try { Stop-Process -Id $p.Id -Force } catch {} }
     foreach ($p in $procs) { try { [void]$p.WaitForExit(30000) } catch {} }
