@@ -24,6 +24,7 @@ namespace LP17Hotfix
             PwuInfoNotices.Apply();
             MeleeAnimInfoNotices.Apply();
             ScosNoticeVideoPlayerUtil.Apply();
+            PatchTargets.Apply(); // before LoadedModManager applies the XML patches
         }
     }
 
@@ -38,6 +39,7 @@ namespace LP17Hotfix
             DuplicateEquippable.Apply();
             YartLayerSeparation.Apply();
             TranslationDump.Apply();
+            BackCompatOfPlayer.Apply();
         }
     }
 
@@ -172,6 +174,106 @@ namespace LP17Hotfix
             Lp.Note = defs + " defs";
             return null;
         });
+    }
+
+    static class PatchTargets
+    {
+        // {mod, defName in the xpath, new defName or null to drop the operation, condition}
+        static readonly (string mod, string def, string to, Func<bool> when)[] Rules =
+        {
+            // VFE Security 1.7 loads its 1.6 defs, which no longer have these 1.5 turrets.
+            ("issaczhuang.muzzleflash", "VFES_Gun_HMGComplex", null, () => true),
+            ("issaczhuang.muzzleflash", "VFES_Gun_SentryTurret", null, () => true),
+            ("issaczhuang.muzzleflash", "VFES_Artillery_Weapon", null, () => true),
+            ("issaczhuang.muzzleflash", "VFES_Gun_ChargeComplex", null, () => true),
+            // Vanilla Weapons Expanded moved its musket and flintlock to Medieval 2.
+            ("issaczhuang.muzzleflash", "VWE_Gun_Musket", "VFEM2_Gun_Musket", () => Active("OskarPotocki.VFE.Medieval2")),
+            ("issaczhuang.muzzleflash", "VWE_Gun_Flintlock", "VFEM2_Gun_Flintlock", () => Active("OskarPotocki.VFE.Medieval2")),
+            // Only the Combat Extended folder of All Bamba Turrets defines the charge AA gun.
+            ("bambaryla.allbambaturrets", "ABT_Gun_ChargeAA", null, () => !Active("CETeam.CombatExtended")),
+        };
+
+        static readonly FieldInfo XPath = AccessTools.Field(typeof(PatchOperationPathed), "xpath");
+        static int dropped, retargeted;
+
+        // Muzzle Flash's SafePatcher warns while patching when an xpath finds no def, so these operations are
+        // rewritten in the mods' loaded patch lists before the patches run.
+        internal static void Apply() => Lp.Run("patch-targets", () =>
+        {
+            if (XPath == null) return "PatchOperationPathed.xpath not found";
+            dropped = retargeted = 0;
+            foreach (ModContentPack mod in LoadedModManager.RunningMods)
+            {
+                var rules = Array.FindAll(Rules, r => string.Equals(mod.PackageIdPlayerFacing, r.mod, StringComparison.OrdinalIgnoreCase));
+                if (rules.Length > 0) Walk((List<PatchOperation>)mod.Patches, rules);
+            }
+            if (dropped + retargeted == 0) return "no matching patch operation";
+            Lp.Note = dropped + " dropped, " + retargeted + " retargeted";
+            return null;
+        });
+
+        // ModsConfig.IsActive compares the raw list entries, which carry a "_steam" suffix for workshop copies.
+        static bool Active(string id)
+        {
+            foreach (ModContentPack m in LoadedModManager.RunningMods)
+                if (string.Equals(m.PackageIdPlayerFacing, id, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        static void Walk(List<PatchOperation> ops, (string mod, string def, string to, Func<bool> when)[] rules)
+        {
+            for (int i = ops.Count - 1; i >= 0; i--)
+                if (ops[i] != null && !Fix(ops[i], rules)) { ops.RemoveAt(i); dropped++; }
+        }
+
+        // Returns false when the operation must be removed; recurses into sequences, FindMod and conditionals.
+        static bool Fix(PatchOperation op, (string mod, string def, string to, Func<bool> when)[] rules)
+        {
+            if (op is PatchOperationPathed && XPath.GetValue(op) is string xpath)
+                foreach (var r in rules)
+                {
+                    string target = "defName=\"" + r.def + "\"";
+                    if (!xpath.Contains(target) || !r.when()) continue;
+                    if (r.to == null) return false;
+                    XPath.SetValue(op, xpath.Replace(target, "defName=\"" + r.to + "\""));
+                    retargeted++;
+                }
+            for (Type t = op.GetType(); t != null && t != typeof(object); t = t.BaseType)
+                foreach (FieldInfo f in t.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+                {
+                    if (typeof(List<PatchOperation>).IsAssignableFrom(f.FieldType))
+                    {
+                        if (f.GetValue(op) is List<PatchOperation> list) Walk(list, rules);
+                    }
+                    else if (typeof(PatchOperation).IsAssignableFrom(f.FieldType) && f.GetValue(op) is PatchOperation child && !Fix(child, rules))
+                    {
+                        f.SetValue(op, null);
+                        dropped++;
+                    }
+                }
+            return true;
+        }
+    }
+
+    static class BackCompatOfPlayer
+    {
+        static readonly MethodInfo OfPlayer = AccessTools.PropertyGetter(typeof(RimWorld.Faction), nameof(RimWorld.Faction.OfPlayer));
+
+        // Vanilla tests pawn.Faction == Faction.OfPlayer before Scribe.mode == PostLoadInit, so a mechanoid saved
+        // inside a quest (a pending drop pod) throws while the quest list loads, before the world exists.
+        internal static void Apply() => Lp.Run("backcompat-ofplayer", () =>
+        {
+            MethodInfo target = AccessTools.Method(typeof(BackCompatibilityConverter_Universal), "PostExposeData");
+            if (target == null || OfPlayer == null) return "BackCompatibilityConverter_Universal.PostExposeData not found";
+            new Harmony(Lp.Id).Patch(target, transpiler: new HarmonyMethod(typeof(BackCompatOfPlayer), nameof(Transpiler)));
+            return null;
+        });
+
+        static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> code) =>
+            NoticeSwap.Replace(code, null, OfPlayer, AccessTools.Method(typeof(BackCompatOfPlayer), nameof(OfPlayerOrNull)));
+
+        // Without a world the mode is not PostLoadInit yet, so the vanilla condition is false either way.
+        static RimWorld.Faction OfPlayerOrNull() => Current.Game?.World?.factionManager == null ? null : RimWorld.Faction.OfPlayer;
     }
 
     static class YartLayerSeparation

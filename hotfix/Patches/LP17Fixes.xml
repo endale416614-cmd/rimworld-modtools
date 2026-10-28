@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Patch>
+	<!-- citadel-flame-sound: Fortification Industrial - Citadel's flame wall turret still names the VFE Security 1.5 sound
+	     VFE_Shot_InfernoSpewer. VFE Security 1.6 dropped it; its flame turret now uses the vanilla InfernoCannon_Fire. -->
+	<Operation Class="PatchOperationConditional">
+		<xpath>Defs/ThingDef[defName="FTC_Wall_Flame_Gun"]/verbs/li[soundCast="VFE_Shot_InfernoSpewer"]</xpath>
+		<match Class="PatchOperationReplace">
+			<xpath>Defs/ThingDef[defName="FTC_Wall_Flame_Gun"]/verbs/li/soundCast[text()="VFE_Shot_InfernoSpewer"]</xpath>
+			<value>
+				<soundCast>InfernoCannon_Fire</soundCast>
+			</value>
+		</match>
+	</Operation>
+
+	<!-- betterarchitect-order: Better Architect sets the int field DesignationCategoryDef.order of the Gravship
+	     categories to 0.1, which the game parses as 0 with a warning. Write the 0 it already uses. -->
+	<Operation Class="PatchOperationConditional">
+		<xpath>Defs/DesignationCategoryDef[order="0.1"]</xpath>
+		<match Class="PatchOperationReplace">
+			<xpath>Defs/DesignationCategoryDef/order[text()="0.1"]</xpath>
+			<value>
+				<order>0</order>
+			</value>
+		</match>
+	</Operation>
+
+	<!-- vge-explodeonfire: Vanilla Gravship Expanded 1.7 sets minFireToExplode to 0.35, but VEF declares it as an int
+	     and compares fireSize >= (float)minFireToExplode, so it already loads as 0 (any fire). Write that 0. -->
+	<Operation Class="PatchOperationConditional">
+		<xpath>Defs/HediffDef/comps/li[@Class="VEF.AnimalBehaviours.HediffCompProperties_ExplodeOnFire"][minFireToExplode="0.35"]</xpath>
+		<match Class="PatchOperationReplace">
+			<xpath>Defs/HediffDef/comps/li[@Class="VEF.AnimalBehaviours.HediffCompProperties_ExplodeOnFire"]/minFireToExplode[text()="0.35"]</xpath>
+			<value>
+				<minFireToExplode>0</minFireToExplode>
+			</value>
+		</match>
+	</Operation>
+
+	<!-- ancienthatch-shotover: Buildable Ancient Stockpiles makes the flat, impassable AncientHatch player-buildable,
+	     which trips the 1.7 check for impassable buildings that can be shot over. A floor hatch is meant to be. -->
+	<Operation Class="PatchOperationConditional">
+		<xpath>Defs/ThingDef[defName="AncientHatch"][designationCategory][not(disableImpassableShotOverConfigError)]</xpath>
+		<match Class="PatchOperationAdd">
+			<xpath>Defs/ThingDef[defName="AncientHatch"]</xpath>
+			<value>
+				<disableImpassableShotOverConfigError>true</disableImpassableShotOverConfigError>
+			</value>
+		</match>
+	</Operation>
+</Patch>
