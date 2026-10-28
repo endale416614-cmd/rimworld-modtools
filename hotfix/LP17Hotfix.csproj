@@ -12,7 +12,8 @@
     <DebugType>none</DebugType>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <RWDir>F:\Steam\steamapps\common\RimWorld</RWDir>
-    <HarmonyDll>$(RWDir)\Mods\00-core__brrainz.harmony\1.7\Assemblies\0Harmony.dll</HarmonyDll>
+    <HarmonyDll Condition="Exists('$(RWDir)\Mods\00-core__brrainz.harmony\1.7\Assemblies\0Harmony.dll')">$(RWDir)\Mods\00-core__brrainz.harmony\1.7\Assemblies\0Harmony.dll</HarmonyDll>
+    <HarmonyDll Condition="'$(HarmonyDll)' == ''">F:\Steam\steamapps\workshop\content\294100\2009463077\1.7\Assemblies\0Harmony.dll</HarmonyDll>
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="System.Private.CoreLib"><HintPath>$(RWDir)\System.Private.CoreLib.dll</HintPath><Private>false</Private></Reference>

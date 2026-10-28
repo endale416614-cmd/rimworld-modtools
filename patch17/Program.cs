@@ -242,6 +242,74 @@ foreach (var tr in module.GetTypeReferences().ToList())
         Hit("0Harmony polyfill " + tr.Name + " -> System.Runtime");
     }
 
+// More Birds: PickUpBird reads clickedPawn.training, which is null for humans; its guard lets player colonists through
+// (&& where || was meant), so every colonist-on-colonist float menu threw. Return no option when training is null.
+var pickUp = module.GetType("_11BulletsBirdAttack.FloatmenuOptionProvider_PickUpBird")?.Methods.FirstOrDefault(m => m.Name == "GetSingleOptionFor");
+if (pickUp != null && pickUp.Body.Instructions.Any(i => i.Operand is FieldReference f && f.Name == "training"))
+{
+    var training = (FieldReference)pickUp.Body.Instructions.First(i => i.Operand is FieldReference f && f.Name == "training").Operand;
+    var il = pickUp.Body.GetILProcessor();
+    var start = pickUp.Body.Instructions[0];
+    var none = il.Create(OpCodes.Ldnull);
+    il.InsertBefore(start, il.Create(OpCodes.Ldarg_1));
+    il.InsertBefore(start, il.Create(OpCodes.Brfalse, none));
+    il.InsertBefore(start, il.Create(OpCodes.Ldarg_1));
+    il.InsertBefore(start, il.Create(OpCodes.Ldfld, training));
+    il.InsertBefore(start, il.Create(OpCodes.Brtrue, start));
+    il.InsertBefore(start, none);
+    il.InsertBefore(start, il.Create(OpCodes.Ret));
+    pickUp.Body.OptimizeMacros();
+    Hit("More Birds PickUpBird: no option when training is null");
+}
+
+// Surrogate Mechanoid: 1.7's deep drill lambda already compiles pawn.skills?.Learn (dup; brtrue; pop; ret). The mod's
+// own dup/branch after ldfld skills then leaves an inconsistent stack, the patch throws inside the Mod constructor and
+// the mod's later patches never apply. Pass the IL through unchanged.
+var drill = module.GetType("SpecificWorkJobGiver.MechFriendly.MechFriendly_JobDriver_OperateDeepDrill")?.Methods.FirstOrDefault(m => m.Name == "Transpiler");
+if (drill != null && drill.Body.Instructions.Count > 2)
+{
+    drill.Body.Instructions.Clear(); drill.Body.Variables.Clear(); drill.Body.ExceptionHandlers.Clear();
+    var il = drill.Body.GetILProcessor();
+    il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Ret);
+    Hit("Surrogate Mechanoid deep drill transpiler -> pass-through (1.7 null-checks skills)");
+}
+
+// Giant imperial turret: ShiftProj.transp scans TryCastShot with i <= Count and reads past the end when no
+// callvirt Thing.get_DrawPos is left (another mod's earlier transpiler replaces it), which aborts PatchAll in a static
+// constructor. Scan i < Count and leave the method unchanged when nothing matched (index stays 0).
+var shift = module.GetType("BreadMoProjOffset.ShiftProj")?.Methods.FirstOrDefault(m => m.Name == "transp");
+if (shift != null)
+{
+    var ins = shift.Body.Instructions;
+    var cgt = ins.FirstOrDefault(i => i.OpCode == OpCodes.Cgt && i.Previous?.OpCode == OpCodes.Callvirt
+        && i.Next?.OpCode == OpCodes.Ldc_I4_0 && i.Next.Next?.OpCode == OpCodes.Ceq);
+    var insert = ins.FirstOrDefault(i => i.Operand is MethodReference m && m.Name == "InsertRange");
+    if (cgt != null && insert != null)
+    {
+        var il = shift.Body.GetILProcessor();
+        cgt.OpCode = OpCodes.Clt;
+        il.Remove(cgt.Next.Next); il.Remove(cgt.Next);
+        // InsertRange's arguments start with ldloc.0 (list), ldloc.1 (index); the instruction after it begins the return.
+        var listLoad = ins[ins.IndexOf(insert)];
+        while (!(listLoad.OpCode == OpCodes.Ldloc_0 && listLoad.Next.OpCode == OpCodes.Ldloc_1)) listLoad = listLoad.Previous;
+        var after = insert.Next.OpCode == OpCodes.Nop ? insert.Next.Next : insert.Next;
+        shift.Body.SimplifyMacros();
+        il.InsertBefore(listLoad, il.Create(OpCodes.Ldloc_1));
+        il.InsertBefore(listLoad, il.Create(OpCodes.Brfalse, after));
+        shift.Body.OptimizeMacros();
+        Hit("Giant imperial turret ShiftProj.transp: bounded scan, no insert when not found");
+    }
+}
+
+// Waylith 1.7.4990 moved types to new namespaces; same assembly, same members.
+var moved = new Dictionary<string, string> { ["Waylith.Rendering.TexturePixelData"] = "Waylith.Graphics.Textures" };
+foreach (var tr in module.GetTypeReferences().ToList())
+    if (tr.Scope?.Name == "Waylith" && moved.TryGetValue(tr.FullName, out var ns))
+    {
+        Hit("Waylith moved type " + tr.FullName + " -> " + ns);
+        tr.Namespace = ns;
+    }
+
 foreach (var kv in hits) Console.WriteLine($"{kv.Value,4}  {kv.Key}");
 if (hits.Count == 0) { Console.WriteLine("no rule matched; nothing written"); return 1; }
 module.Write(args[1]);

@@ -35,6 +35,7 @@ namespace LP17Hotfix
             TrainsSpawnHook.Apply();
             VgeSrrUnpatch.Apply();
             SmyhKnownPatch.Apply();
+            DuplicateEquippable.Apply();
             YartLayerSeparation.Apply();
             TranslationDump.Apply();
         }
@@ -148,6 +149,27 @@ namespace LP17Hotfix
             if (known == null) return "ShowMeYourHandsMain.knownPatches not found";
             if (known.Contains(OwnerId)) return "already listed";
             known.Add(OwnerId);
+            return null;
+        });
+    }
+
+    static class DuplicateEquippable
+    {
+        // A CompEquippableAbility* replaces CompEquippable (vanilla uses comps Inherit="False" for that). Defs that
+        // inherit BaseWeapon's CompEquippable as well get two comps with one verb owner ID, and every saved verb is
+        // registered twice on load (Zeus Weapons Pack: CAT_ZeusStandard). Keep only the subclass.
+        internal static void Apply() => Lp.Run("duplicate-equippable", () =>
+        {
+            int defs = 0;
+            foreach (ThingDef def in DefDatabase<ThingDef>.AllDefsListForReading)
+            {
+                if (def.comps == null) continue;
+                bool sub = false;
+                foreach (CompProperties p in def.comps)
+                    if (p.compClass != typeof(CompEquippable) && typeof(CompEquippable).IsAssignableFrom(p.compClass)) sub = true;
+                if (sub && def.comps.RemoveAll(p => p.compClass == typeof(CompEquippable)) > 0) defs++;
+            }
+            Lp.Note = defs + " defs";
             return null;
         });
     }
