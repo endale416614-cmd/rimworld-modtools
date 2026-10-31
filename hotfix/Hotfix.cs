@@ -25,6 +25,9 @@ namespace LP17Hotfix
             MeleeAnimInfoNotices.Apply();
             ScosNoticeVideoPlayerUtil.Apply();
             PatchTargets.Apply(); // before LoadedModManager applies the XML patches
+            GppMarketValueCache.Apply(); // before the performance patch's callers are compiled with KeyOf inlined
+            BwmSettingsNoWorld.Apply(); // before Dub's Mint Menus reads its bill templates in its late-load action
+            HideFlagsNoStub.Apply(); // before Dubs Performance Analyzer's GUI setup sets the flag
         }
     }
 
@@ -40,7 +43,201 @@ namespace LP17Hotfix
             YartLayerSeparation.Apply();
             TranslationDump.Apply();
             BackCompatOfPlayer.Apply();
+            VgeSpawnResume.Apply();
+            CinecamSceneReset.Apply();
+            CryoTankUnspawned.Apply();
+            GoreFootprintType.Apply();
+            MapRemovedRefs.Apply();
+            VfeArtCreatorPrune.Apply();
+            VaeLaunchFaction.Apply();
+            WqRitualNoOutcomes.Apply();
+            GiddyUpMapClose.Apply();
+            FoodVarietyReset.Apply();
+            GzpSowWithoutBill.Apply();
+            PuahQueuedReservation.Apply();
+            VefRaidGroupPrune.Apply();
+            ColonyGroupUniqueId.Apply();
+            SpacerShieldsDebugLine.Apply();
+            LayerConnectionPostLoad.Apply();
+            IsekaiTileNotices.Apply();
         }
+    }
+
+    static class IsekaiTileNotices
+    {
+        static readonly MethodInfo Warning = AccessTools.Method(typeof(Log), "Warning", new[] { typeof(string) });
+        static readonly MethodInfo Message = AccessTools.Method(typeof(Log), "Message", new[] { typeof(string) });
+
+        // A colony whose tile has no land reachable overland has no site for these quests: the addon drops the
+        // quest and the hunt uses the home map, as both mods intend. That is a normal outcome, not a warning.
+        internal static void Apply() => Lp.Run("isekai-tile-notices", () =>
+        {
+            MethodInfo quest = AccessTools.Method("IsekaiCreatures.Quests.IncidentWorker_IsekaiCreatureQuest:BuildAndPostQuest");
+            MethodInfo hunt = AccessTools.Method("IsekaiLeveling.Quests.IncidentWorker_IsekaiHunt:CreateHuntQuest");
+            if (quest == null && hunt == null) return "Isekai mods not loaded";
+            Harmony h = new Harmony(Lp.Id);
+            if (quest != null) h.Patch(quest, transpiler: new HarmonyMethod(typeof(IsekaiTileNotices), nameof(Quest)));
+            if (hunt != null) h.Patch(hunt, transpiler: new HarmonyMethod(typeof(IsekaiTileNotices), nameof(Hunt)));
+            return null;
+        });
+
+        static IEnumerable<CodeInstruction> Quest(IEnumerable<CodeInstruction> code) => NoticeSwap.Replace(code, "couldn't find a target tile", Warning, Message);
+
+        static IEnumerable<CodeInstruction> Hunt(IEnumerable<CodeInstruction> code) => NoticeSwap.Replace(code, "Could not find suitable tile", Warning, Message);
+    }
+
+    static class BwmSettingsNoWorld
+    {
+        // Better Workbench Management keeps its bill data in a world component, but Dub's Mint Menus scribes
+        // Bill_Production from mod settings at the main menu, where no world exists; the throw lost every template.
+        internal static void Apply() => Lp.Run("bwm-settings-no-world", () =>
+        {
+            MethodInfo postfix = AccessTools.Method("ImprovedWorkbenches.ExtendedBillData_ExposeData:Postfix");
+            if (postfix == null) return "Better Workbench Management not loaded";
+            new Harmony(Lp.Id).Patch(postfix, prefix: new HarmonyMethod(typeof(BwmSettingsNoWorld), nameof(Prefix)));
+            return null;
+        });
+
+        static bool Prefix() => Current.Game?.World != null;
+    }
+
+    static class HideFlagsNoStub
+    {
+        // The setter only logs that it is a stub; the engine has no hide flags, so skipping it changes nothing.
+        internal static void Apply() => Lp.Run("hideflags-no-stub", () =>
+        {
+            new Harmony(Lp.Id).Patch(AccessTools.PropertySetter(typeof(UnityEngine.Object), "hideFlags"), prefix: new HarmonyMethod(typeof(HideFlagsNoStub), nameof(Prefix)));
+            return null;
+        });
+
+        static bool Prefix() => false;
+    }
+
+    static class PuahQueuedReservation
+    {
+        // The game passes errorOnFailed=false for queued jobs, whose target may be taken by the time they start.
+        // Pick Up And Haul ignores the argument and always logs, though the job then just ends quietly.
+        internal static void Apply() => Lp.Run("puah-queued-reservation", () =>
+        {
+            MethodInfo m = AccessTools.Method("PickUpAndHaul.JobDriver_HaulToInventory:TryMakePreToilReservations");
+            if (m == null) return "Pick Up And Haul not loaded";
+            new Harmony(Lp.Id).Patch(m, transpiler: new HarmonyMethod(typeof(PuahQueuedReservation), nameof(Transpiler)));
+            return null;
+        });
+
+        static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> code)
+        {
+            List<CodeInstruction> list = new List<CodeInstruction>(code);
+            int done = 0;
+            for (int i = 2; i < list.Count; i++)
+            {
+                // Reserve(claimant, target, job, maxPawns, stackCount, layer, errorOnFailed, ignoreOtherReservations)
+                if (list[i].operand is MethodInfo mi && mi.Name == "Reserve" && mi.DeclaringType.Name == "ReservationUtility" && list[i - 2].opcode == OpCodes.Ldc_I4_1)
+                {
+                    list[i - 2].opcode = OpCodes.Ldarg_1;
+                    list[i - 2].operand = null;
+                    done++;
+                }
+            }
+            if (done != 2) throw new InvalidOperationException("expected 2 Reserve calls, found " + done);
+            return list;
+        }
+    }
+
+    static class VefRaidGroupPrune
+    {
+        // RaidGroup keeps its lords and faction by reference and never drops them, so once a raid ends the save
+        // points at objects that are gone: a warning on saving and an error on every load of that save.
+        internal static void Apply() => Lp.Run("vef-raidgroup-prune", () =>
+        {
+            Type t = AccessTools.TypeByName("VEF.Storyteller.RaidGroup");
+            if (t == null) return "RaidGroup not found";
+            new Harmony(Lp.Id).Patch(AccessTools.Method(t, "ExposeData"), prefix: new HarmonyMethod(typeof(VefRaidGroupPrune), nameof(Prefix)));
+            return null;
+        });
+
+        static void Prefix(HashSet<Pawn> ___pawns, HashSet<Verse.AI.Group.Lord> ___lords, ref RimWorld.Faction ___faction)
+        {
+            if (Scribe.mode != LoadSaveMode.Saving) return;
+            ___pawns?.RemoveWhere(p => p == null || p.Discarded);
+            ___lords?.RemoveWhere(l => l?.lordManager == null || !Find.Maps.Contains(l.lordManager.map) || !l.lordManager.lords.Contains(l));
+            if (___faction != null && !Find.FactionManager.AllFactionsListForReading.Contains(___faction)) ___faction = null;
+        }
+    }
+
+    static class ColonyGroupUniqueId
+    {
+        static FieldInfo groupId, colonyGroups;
+        static MethodInfo manager;
+
+        // Colony Groups numbers a group from a count of the current ones, but its load ID is that number alone,
+        // so a group made after a map closed, or a task force next to a colony, can repeat an ID.
+        internal static void Apply() => Lp.Run("colony-group-unique-id", () =>
+        {
+            Type t = AccessTools.TypeByName("TacticalGroups.ColonyGroup");
+            if (t == null) return "Colony Groups not loaded";
+            groupId = AccessTools.Field(t, "groupID");
+            manager = AccessTools.PropertyGetter(AccessTools.TypeByName("TacticalGroups.TacticUtils"), "TacticalGroups");
+            colonyGroups = AccessTools.Field(manager.ReturnType, "colonyGroups");
+            if (groupId == null || colonyGroups == null) return "group fields not found";
+            Harmony h = new Harmony(Lp.Id);
+            HarmonyMethod fix = new HarmonyMethod(typeof(ColonyGroupUniqueId), nameof(Fix));
+            foreach (ConstructorInfo c in AccessTools.GetDeclaredConstructors(t))
+                if (c.GetParameters().Length > 0) h.Patch(c, postfix: fix); // the empty one is the load path, which keeps the saved ID
+            h.Patch(AccessTools.Method(t, "ConvertToTaskForce"), postfix: fix);
+            h.Patch(AccessTools.Method(t, "ConvertToColonyGroup"), postfix: fix);
+            return null;
+        });
+
+        internal static void Fix(object __instance)
+        {
+            int id = (int)groupId.GetValue(__instance), max = 0;
+            bool clash = false;
+            foreach (object g in ((System.Collections.IDictionary)colonyGroups.GetValue(manager.Invoke(null, null))).Values)
+            {
+                if (g == __instance) continue;
+                int other = (int)groupId.GetValue(g);
+                max = Math.Max(max, other);
+                clash |= other == id;
+            }
+            if (clash) groupId.SetValue(__instance, max + 1);
+        }
+    }
+
+    static class SpacerShieldsDebugLine
+    {
+        // A leftover debug line: the mod logs each flyer's def label as a warning on landing.
+        internal static void Apply() => Lp.Run("spacer-shields-debug-line", () =>
+        {
+            MethodInfo m = AccessTools.Method("LTS_SpacerShields.PawnFlyer_LandingEffects_Patch:PawnFlyer_LandingEffects_Postfix");
+            if (m == null) return "Spacer Shields not loaded";
+            new Harmony(Lp.Id).Patch(m, transpiler: new HarmonyMethod(typeof(SpacerShieldsDebugLine), nameof(Transpiler)));
+            return null;
+        });
+
+        static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> code)
+        {
+            MethodInfo warning = AccessTools.Method(typeof(Log), "Warning", new[] { typeof(string) });
+            List<CodeInstruction> list = new List<CodeInstruction>(code);
+            CodeInstruction call = list.Find(c => c.operand as MethodInfo == warning);
+            if (call == null) throw new InvalidOperationException("Log.Warning call not found");
+            call.opcode = OpCodes.Pop;
+            call.operand = null;
+            return list;
+        }
+    }
+
+    static class LayerConnectionPostLoad
+    {
+        // Two scenario layers can hold equal connections (same tag, cost, zoom), and the post-load set rejects the
+        // second with a warning. A connection scribes only plain values, so its post-load pass does nothing.
+        internal static void Apply() => Lp.Run("layerconnection-postload", () =>
+        {
+            new Harmony(Lp.Id).Patch(AccessTools.Method(typeof(PostLoadIniter), "RegisterForPostLoadInit"), prefix: new HarmonyMethod(typeof(LayerConnectionPostLoad), nameof(Prefix)));
+            return null;
+        });
+
+        static bool Prefix(IExposable s) => !(s is RimWorld.LayerConnection);
     }
 
     static class Lp
@@ -274,6 +471,337 @@ namespace LP17Hotfix
 
         // Without a world the mode is not PostLoadInit yet, so the vanilla condition is false either way.
         static RimWorld.Faction OfPlayerOrNull() => Current.Game?.World?.factionManager == null ? null : RimWorld.Faction.OfPlayer;
+    }
+
+    static class VgeSpawnResume
+    {
+        static Type part;
+        static FieldInfo spawned, inSignal;
+
+        // VGE's QuestPart_SpawnThingInteractive opens a map targeter on the quest's accept signal, but a targeter is
+        // not saved: a reload before the click leaves the quest ongoing forever with its ship never spawned.
+        internal static void Apply() => Lp.Run("vge-spawn-resume", () =>
+        {
+            part = AccessTools.TypeByName("VanillaGravshipExpanded.QuestPart_SpawnThingInteractive");
+            if (part == null) return "Vanilla Gravship Expanded not loaded";
+            spawned = AccessTools.Field(part, "spawned");
+            inSignal = AccessTools.Field(part, "inSignal");
+            if (spawned == null || inSignal == null) return "QuestPart_SpawnThingInteractive fields not found";
+            new Harmony(Lp.Id).Patch(AccessTools.Method(typeof(Game), nameof(Game.LoadGame)), postfix: new HarmonyMethod(typeof(VgeSpawnResume), nameof(Postfix)));
+            return null;
+        });
+
+        static void Postfix()
+        {
+            foreach (RimWorld.Quest q in Find.QuestManager.QuestsListForReading)
+            {
+                if (q.State != RimWorld.QuestState.Ongoing) continue;
+                foreach (RimWorld.QuestPart p in q.PartsListForReading)
+                {
+                    // Only the accept signal is known to have fired already for an ongoing quest.
+                    string signal = part.IsInstanceOfType(p) ? (string)inSignal.GetValue(p) : null;
+                    if (signal != "Quest" + q.id + ".Initiate" || (bool)spawned.GetValue(p)) continue;
+                    RimWorld.QuestPart resume = p;
+                    LongEventHandler.ExecuteWhenFinished(() => resume.Notify_QuestSignalReceived(new RimWorld.Signal(signal)));
+                    Log.Message("[LP17 Hotfix] vge-spawn-resume: reopened the landing targeter of quest '" + q.name + "'");
+                }
+            }
+        }
+    }
+
+    static class CinecamSceneReset
+    {
+        static MethodInfo allWorkers;
+
+        // Cinematic Camera keeps its scene workers in a static registry, so their target buffers (letter records,
+        // shot queues, framed pawns) outlive a game load and point at the old game's pawns and factions.
+        internal static void Apply() => Lp.Run("cinecam-scene-reset", () =>
+        {
+            allWorkers = AccessTools.Method("CinematicCamera.SceneRegistry:AllWorkers");
+            if (allWorkers == null) return "Cinematic Camera not loaded";
+            new Harmony(Lp.Id).Patch(AccessTools.Method(typeof(Game), nameof(Game.FinalizeInit)), postfix: new HarmonyMethod(typeof(CinecamSceneReset), nameof(Postfix)));
+            return null;
+        });
+
+        static void Postfix()
+        {
+            int cleared = 0;
+            foreach (object w in (IEnumerable<object>)allWorkers.Invoke(null, null))
+            {
+                AccessTools.Method(w.GetType(), "Cleanup")?.Invoke(w, null);
+                for (Type t = w.GetType(); t != null && t != typeof(object); t = t.BaseType)
+                    foreach (FieldInfo f in t.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+                    {
+                        object c = f.GetValue(w);
+                        MethodInfo clear = c == null || c.GetType().Namespace != "System.Collections.Generic" ? null : c.GetType().GetMethod("Clear", Type.EmptyTypes);
+                        if (clear == null) continue;
+                        clear.Invoke(c, null);
+                        cleared++;
+                    }
+            }
+            if (cleared > 0) Log.Message("[LP17 Hotfix] cinecam-scene-reset: cleared " + cleared + " scene buffers");
+        }
+    }
+
+    static class CryoTankUnspawned
+    {
+        // [sbz] Cryogenic Tank reads target.Map without checking it, so right-clicking a pawn that is being
+        // carried (not spawned, Map null) throws inside the float menu.
+        internal static void Apply() => Lp.Run("cryotank-unspawned", () =>
+        {
+            MethodInfo make = AccessTools.Method("sbz.Display.FloatMenuOptionProvider_CarryToCryogenicTank:MakeOption");
+            if (make == null) return "Cryogenic Tank float menu provider not found";
+            new Harmony(Lp.Id).Patch(make, new HarmonyMethod(typeof(CryoTankUnspawned), nameof(Prefix)));
+            return null;
+        });
+
+        static bool Prefix(Thing target, ref FloatMenuOption __result)
+        {
+            if (target != null && target.Spawned) return true;
+            __result = null;
+            return false;
+        }
+    }
+
+    static class GoreFootprintType
+    {
+        // Gore Perfected looks for Verse.PawnFootprintMaker, but the class is RimWorld.PawnFootprintMaker, so its hook
+        // that hides vanilla snow prints is never placed. Place it with the right type (its warning is already logged).
+        internal static void Apply() => Lp.Run("gore-footprint-type", () =>
+        {
+            Type patch = AccessTools.TypeByName("GorePerfected.FootprintPatch");
+            if (patch == null) return "Gore Perfected not loaded";
+            FieldInfo maker = AccessTools.Field(patch, "makerPawn");
+            MethodInfo prefix = AccessTools.Method(patch, "VanillaFootprint_Prefix");
+            MethodInfo place = AccessTools.Method(typeof(RimWorld.PawnFootprintMaker), "TryPlaceFootprint");
+            FieldInfo pawn = AccessTools.Field(typeof(RimWorld.PawnFootprintMaker), "pawn");
+            if (maker == null || prefix == null || place == null || pawn == null) return "footprint members not found";
+            if (maker.GetValue(null) != null) return "Gore Perfected found the footprint code itself";
+            maker.SetValue(null, pawn);
+            new Harmony(Lp.Id).Patch(place, new HarmonyMethod(prefix));
+            return null;
+        });
+    }
+
+    static class GppMarketValueCache
+    {
+        // WOWGAG's Performance Patch caches def stats as constants, but MarketValue follows ingredient prices that
+        // other mods adjust during play; its self-check then finds a mismatch, warns and drops the whole cache.
+        internal static void Apply() => Lp.Run("gpp-marketvalue-cache", () =>
+        {
+            MethodInfo keyOf = AccessTools.Method("GUIPerformancePatch.GppDefStat:KeyOf");
+            if (keyOf == null) return "GppDefStat.KeyOf not found";
+            new Harmony(Lp.Id).Patch(keyOf, new HarmonyMethod(typeof(GppMarketValueCache), nameof(Prefix)));
+            return null;
+        });
+
+        static bool Prefix(RimWorld.StatDef stat, ref long key, ref bool __result)
+        {
+            if (stat != RimWorld.StatDefOf.MarketValue) return true;
+            key = 0;
+            __result = false;
+            return false;
+        }
+    }
+
+    static class MapRemovedRefs
+    {
+        static Type cinecam;
+        static FieldInfo scanTick;
+
+        // A removed map stays referenced by joiner letters (saved, so every later load warns it cannot resolve the map)
+        // and by Cinematic Camera's map list, which it rescans on a timer and so may switch to the removed map.
+        internal static void Apply() => Lp.Run("map-removed-refs", () =>
+        {
+            cinecam = AccessTools.TypeByName("CinematicCamera.CinematicCameraManager");
+            scanTick = cinecam == null ? null : AccessTools.Field(cinecam, "directorScanTick");
+            new Harmony(Lp.Id).Patch(AccessTools.Method(typeof(Game), nameof(Game.DeinitAndRemoveMap)),
+                new HarmonyMethod(typeof(MapRemovedRefs), nameof(Prefix)), new HarmonyMethod(typeof(MapRemovedRefs), nameof(Postfix)));
+            Lp.Note = scanTick == null ? "letters only" : "letters, Cinematic Camera";
+            return null;
+        });
+
+        static void Prefix(Map map)
+        {
+            foreach (Letter l in Find.LetterStack.LettersListForReading)
+                if (l is RimWorld.ChoiceLetter_AcceptJoiner j && j.overrideMap == map) j.overrideMap = null;
+            foreach (RimWorld.IArchivable a in Find.Archive.ArchivablesListForReading)
+                if (a is RimWorld.ChoiceLetter_AcceptJoiner j && j.overrideMap == map) j.overrideMap = null;
+        }
+
+        static void Postfix()
+        {
+            if (scanTick == null) return;
+            GameComponent c = Current.Game.components.Find(x => x.GetType() == cinecam);
+            if (c != null) scanTick.SetValue(c, -1); // rescan before the next pick
+        }
+    }
+
+    static class VfeArtCreatorPrune
+    {
+        static FieldInfo instance, artCreator;
+
+        // VFE Empire records who made each artwork but never drops an entry, so art that was destroyed or left on an
+        // abandoned map is saved as a null key and logs "Null key while loading dictionary" on every load.
+        internal static void Apply() => Lp.Run("vfe-artcreator-prune", () =>
+        {
+            Type comp = AccessTools.TypeByName("VFEEmpire.GameComponent_Empire");
+            if (comp == null) return "VFE Empire not loaded";
+            instance = AccessTools.Field(comp, "Instance");
+            artCreator = AccessTools.Field(comp, "artCreator");
+            if (instance == null || artCreator == null) return "GameComponent_Empire fields not found";
+            Harmony h = new Harmony(Lp.Id);
+            h.Patch(AccessTools.Method(comp, "ExposeData"), new HarmonyMethod(typeof(VfeArtCreatorPrune), nameof(SavePrefix)));
+            h.Patch(AccessTools.Method(typeof(Game), nameof(Game.DeinitAndRemoveMap)), new HarmonyMethod(typeof(VfeArtCreatorPrune), nameof(MapPrefix)));
+            return null;
+        });
+
+        static Dictionary<ThingWithComps, Pawn> Art(object comp) => comp == null ? null : (Dictionary<ThingWithComps, Pawn>)artCreator.GetValue(comp);
+
+        static void SavePrefix(object __instance)
+        {
+            if (Scribe.mode == LoadSaveMode.Saving) Art(__instance)?.RemoveAll(kv => kv.Key == null || kv.Key.Destroyed);
+        }
+
+        // MapHeld is only right before the map leaves Find.Maps.
+        static void MapPrefix(Map map) => Art(instance.GetValue(null))?.RemoveAll(kv => kv.Key != null && kv.Key.MapHeld == map);
+    }
+
+    static class VaeLaunchFaction
+    {
+        static readonly MethodInfo isPlayer = AccessTools.PropertyGetter(typeof(RimWorld.Faction), nameof(RimWorld.Faction.IsPlayer));
+
+        // Vanilla Achievements Expanded counts crew and animals at gravship takeoff with x.Faction.IsPlayer, which throws
+        // for wild animals (no faction); each throw makes VAE unlock the card unearned and log an error.
+        internal static void Apply() => Lp.Run("vae-launch-faction", () =>
+        {
+            Type tracker = AccessTools.TypeByName("AchievementsExpanded.GravshipLaunchContentsTracker");
+            if (tracker == null) return "Vanilla Achievements Expanded not loaded";
+            Harmony h = new Harmony(Lp.Id);
+            int patched = 0;
+            foreach (Type n in tracker.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic))
+                foreach (MethodInfo m in n.GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+                {
+                    if (!Calls(m)) continue;
+                    h.Patch(m, transpiler: new HarmonyMethod(typeof(VaeLaunchFaction), nameof(Transpiler)));
+                    patched++;
+                }
+            if (patched == 0) return "no Faction.IsPlayer call in the tracker's lambdas";
+            Lp.Note = patched + " lambdas";
+            return null;
+        });
+
+        static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> code)
+        {
+            foreach (CodeInstruction i in code)
+            {
+                if (i.Calls(isPlayer)) { i.opcode = OpCodes.Call; i.operand = AccessTools.Method(typeof(VaeLaunchFaction), nameof(IsPlayer)); }
+                yield return i;
+            }
+        }
+
+        static bool Calls(MethodInfo m)
+        {
+            foreach (KeyValuePair<OpCode, object> i in PatchProcessor.ReadMethodBody(m))
+                if (Equals(i.Value, isPlayer)) return true;
+            return false;
+        }
+
+        static bool IsPlayer(RimWorld.Faction f) => f != null && f.IsPlayer;
+    }
+
+    static class WqRitualNoOutcomes
+    {
+        // Wants and Quirks asks every quality ritual for a random outcome, but rituals like the gravship launch have no
+        // outcome chances, so the empty weighted pick logs an error. The mod already reads a null outcome as not positive.
+        internal static void Apply() => Lp.Run("wq-ritual-no-outcomes", () =>
+        {
+            MethodInfo m = AccessTools.Method("WantsAndQuirks.LordJob_Ritual_ApplyOutcome_Patch:RitualOutcomePositive");
+            if (m == null) return "Wants and Quirks not loaded";
+            new Harmony(Lp.Id).Patch(m, new HarmonyMethod(typeof(WqRitualNoOutcomes), nameof(Prefix)));
+            return null;
+        });
+
+        static bool Prefix(RimWorld.LordJob_Ritual ritual, ref bool __result)
+        {
+            if (!(ritual?.Ritual?.outcomeEffect is RimWorld.RitualOutcomeEffectWorker_FromQuality w) || !w.def.outcomeChances.NullOrEmpty()) return true;
+            __result = false;
+            return false;
+        }
+    }
+
+    static class GiddyUpMapClose
+    {
+        static Map closing;
+
+        // When a map closes, despawning a mount ends Giddy-Up's mounted job, whose finish action sends a non-player mount
+        // near the edge off the map: it is despawned and passed to the world inside the despawn, which then errors twice.
+        internal static void Apply() => Lp.Run("giddyup-map-close", () =>
+        {
+            if (AccessTools.TypeByName("GiddyUp.Jobs.JobDriver_Mounted") == null) return "Giddy-Up not loaded";
+            Harmony h = new Harmony(Lp.Id);
+            h.Patch(AccessTools.Method("Verse.MapDeiniter:PassPawnsToWorld"), new HarmonyMethod(typeof(GiddyUpMapClose), nameof(PassPrefix)),
+                finalizer: new HarmonyMethod(typeof(GiddyUpMapClose), nameof(PassFinalizer)));
+            h.Patch(AccessTools.Method(typeof(Pawn), nameof(Pawn.ExitMap)), new HarmonyMethod(typeof(GiddyUpMapClose), nameof(ExitPrefix)));
+            return null;
+        });
+
+        static void PassPrefix(Map map) => closing = map;
+        static void PassFinalizer() => closing = null;
+
+        // The closing map passes every pawn to the world itself.
+        static bool ExitPrefix(Pawn __instance) => closing == null || __instance.MapHeld != closing;
+    }
+
+    static class FoodVarietyReset
+    {
+        static FieldInfo diets, needers;
+
+        // VE Food Variety keeps its pawn diets in static fields that a new game or load never clears, so pawns of the
+        // previous game are saved into the next one and fail to resolve on every later load.
+        internal static void Apply() => Lp.Run("foodvariety-reset", () =>
+        {
+            Type comp = AccessTools.TypeByName("VanillaCookingExpandedVariety.GameComponent_FoodVariety");
+            if (comp == null) return "VE Food Variety not loaded";
+            diets = AccessTools.Field(comp, "pawns_and_diet");
+            needers = AccessTools.Field(comp, "colonists_with_foodvariety_need");
+            if (diets == null || needers == null) return "GameComponent_FoodVariety fields not found";
+            new Harmony(Lp.Id).Patch(AccessTools.Constructor(comp, new[] { typeof(Game) }), postfix: new HarmonyMethod(typeof(FoodVarietyReset), nameof(Postfix)));
+            return null;
+        });
+
+        static void Postfix()
+        {
+            (diets.GetValue(null) as System.Collections.IDictionary)?.Clear();
+            (needers.GetValue(null) as System.Collections.IList)?.Clear();
+        }
+    }
+
+    static class GzpSowWithoutBill
+    {
+        static MethodInfo setRequire;
+
+        // Growing Zones Plus refuses to sow a zone without an active bill, but a zone whose plant was set directly
+        // (not through its bills tab) has none, so growers never touch it. A zone with no bills sows its chosen plant.
+        internal static void Apply() => Lp.Run("gzp-sow-without-bill", () =>
+        {
+            Type zone = AccessTools.TypeByName("Growing_Zones_Plus.Zone_GrowingPlus");
+            if (zone == null) return "Growing Zones Plus not loaded";
+            setRequire = AccessTools.PropertySetter(zone, "RequireActiveBillToSow");
+            if (setRequire == null) return "RequireActiveBillToSow not found";
+            Harmony h = new Harmony(Lp.Id);
+            foreach (ConstructorInfo c in AccessTools.GetDeclaredConstructors(zone))
+                h.Patch(c, postfix: new HarmonyMethod(typeof(GzpSowWithoutBill), nameof(CtorPostfix)));
+            h.Patch(AccessTools.Method(zone, "ExposeData"), postfix: new HarmonyMethod(typeof(GzpSowWithoutBill), nameof(ExposePostfix)));
+            return null;
+        });
+
+        static void CtorPostfix(object __instance) => setRequire.Invoke(__instance, new object[] { false });
+
+        static void ExposePostfix(object __instance)
+        {
+            if (Scribe.mode == LoadSaveMode.PostLoadInit && ((RimWorld.IBillGiver)__instance).BillStack.Count == 0) setRequire.Invoke(__instance, new object[] { false });
+        }
     }
 
     static class YartLayerSeparation
