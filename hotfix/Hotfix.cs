@@ -25,9 +25,12 @@ namespace LP17Hotfix
             MeleeAnimInfoNotices.Apply();
             ScosNoticeVideoPlayerUtil.Apply();
             PatchTargets.Apply(); // before LoadedModManager applies the XML patches
+            CuisineRecipeRoles.Apply(); // same
             GppMarketValueCache.Apply(); // before the performance patch's callers are compiled with KeyOf inlined
             BwmSettingsNoWorld.Apply(); // before Dub's Mint Menus reads its bill templates in its late-load action
             HideFlagsNoStub.Apply(); // before Dubs Performance Analyzer's GUI setup sets the flag
+            YayoToolsCompat.Apply(); // before Show Me Your Tools patches at startup
+            DefOfWrongType.Apply(); // before the game binds DefOfs
         }
     }
 
@@ -65,7 +68,103 @@ namespace LP17Hotfix
             WandererJoinNewTemp.Apply();
             ArtilleryUnmannedGizmo.Apply();
             InsectGlideJob.Apply();
+            VefExtinguishNoAttachments.Apply();
+            HiveLookupNoMap.Apply();
         }
+    }
+
+    static class VefExtinguishNoAttachments
+    {
+        // VEF's firefoam hook reads CompAttachBase.attachments, a list the game only creates for the first attachment. Firefoam
+        // threw for anything that had never burned, and the rest of that explosion cell was skipped.
+        internal static void Apply() => Lp.Run("vef-extinguish-no-attachments", () =>
+        {
+            MethodInfo m = AccessTools.Method("VEF.Things.VanillaExpandedFramework_DamageWorker_Extinguish_Apply_Patch:Postfix");
+            if (m == null) return "VEF firefoam hook not found";
+            new Harmony(Lp.Id).Patch(m, new HarmonyMethod(typeof(VefExtinguishNoAttachments), nameof(Prefix)));
+            return null;
+        });
+
+        static void Prefix(Thing victim)
+        {
+            CompAttachBase comp = victim.TryGetComp<CompAttachBase>();
+            if (comp != null && comp.attachments == null) comp.attachments = new List<AttachableThing>();
+        }
+    }
+
+    static class HiveLookupNoMap
+    {
+        // A hive lord can own a pawn that is not on a map yet, and both the game's and VFE Insectoids' hive search read its map.
+        // The search threw and the lord's duties stopped there. A pawn with no map has no reachable hive, which the callers handle.
+        internal static void Apply() => Lp.Run("hive-lookup-no-map", () =>
+        {
+            MethodInfo m = AccessTools.Method(typeof(RimWorld.LordToil_HiveRelated), "FindClosestHive");
+            new Harmony(Lp.Id).Patch(m, new HarmonyMethod(typeof(HiveLookupNoMap), nameof(Prefix)) { priority = Priority.First });
+            return null;
+        });
+
+        static bool Prefix(ref RimWorld.Hive __result, Pawn pawn)
+        {
+            if (pawn.Map != null) return true;
+            __result = null;
+            return false;
+        }
+    }
+
+    static class YayoToolsCompat
+    {
+        // Show Me Your Tools enables its Yayo's Animation patches only for the Continued package id, so Yayo Animation 1.7 +
+        // Tick Fix (same code and Harmony id, own package id) would run without them. Its check caches the answer in this field.
+        internal static void Apply() => Lp.Run("yayo-tools-compat", () =>
+        {
+            FieldInfo cached = AccessTools.Field("JobEffects.YayoCompat:active");
+            if (cached == null) return "Show Me Your Tools not loaded";
+            if (ModLister.GetActiveModWithIdentifier("com.yayo.yayoAni.continued.briana17", true) == null) return "Yayo Animation 1.7 + Tick Fix not active";
+            cached.SetValue(null, (bool?)true);
+            return null;
+        });
+    }
+
+    static class CuisineRecipeRoles
+    {
+        // Cuisine Story's recipe roles are one patch sequence. A sequence stops at its first step that finds no def, and its
+        // success=Always hides that, so a list without the Wolfein, Epona and Tav mods lost every step after the second,
+        // including the Vanilla Cooking recipes. Each step now runs on its own.
+        internal static void Apply() => Lp.Run("cuisine-recipe-roles", () =>
+        {
+            FieldInfo steps = AccessTools.Field(typeof(PatchOperationSequence), "operations");
+            FieldInfo success = AccessTools.Field(typeof(PatchOperation), "success");
+            foreach (ModContentPack mod in LoadedModManager.RunningMods)
+            {
+                if (!string.Equals(mod.PackageIdPlayerFacing, "rimdream.rimcuisine", StringComparison.OrdinalIgnoreCase)) continue;
+                var patches = (List<PatchOperation>)mod.Patches;
+                int i = patches.FindIndex(p => p is PatchOperationSequence && p.sourceFile != null && p.sourceFile.EndsWith("LowConfidenceRecipeRoles.xml"));
+                if (i < 0) return "recipe role patch not found";
+                var list = (List<PatchOperation>)steps.GetValue(patches[i]);
+                foreach (PatchOperation step in list)
+                {
+                    success.SetValue(step, Enum.Parse(success.FieldType, "Always"));
+                    step.sourceFile = patches[i].sourceFile;
+                }
+                patches.RemoveAt(i);
+                patches.InsertRange(i, list);
+                return null;
+            }
+            return "Cuisine Story not loaded";
+        });
+    }
+
+    static class DefOfWrongType
+    {
+        // Rustspark Crisis's DefOf class passes typeof(ThingDef) instead of itself to this check, which only warns about that
+        // typo. A def type is never a DefOf class, so the call has nothing to check.
+        internal static void Apply() => Lp.Run("defof-wrong-type", () =>
+        {
+            new Harmony(Lp.Id).Patch(AccessTools.Method(typeof(RimWorld.DefOfHelper), nameof(RimWorld.DefOfHelper.EnsureInitializedInCtor)), new HarmonyMethod(typeof(DefOfWrongType), nameof(Prefix)));
+            return null;
+        });
+
+        static bool Prefix(Type defOf) => !typeof(Def).IsAssignableFrom(defOf);
     }
 
     static class WandererJoinNewTemp
@@ -486,6 +585,14 @@ namespace LP17Hotfix
             ("issaczhuang.muzzleflash", "VFES_Gun_SentryTurret", null, () => true),
             ("issaczhuang.muzzleflash", "VFES_Artillery_Weapon", null, () => true),
             ("issaczhuang.muzzleflash", "VFES_Gun_ChargeComplex", null, () => true),
+            // Rimsenal Augmented Vanilla dropped its smart and nest guns after its 1.4 folder.
+            ("issaczhuang.muzzleflash", "Gun_SmartRifle", null, () => true),
+            ("issaczhuang.muzzleflash", "Gun_SmartPistol", null, () => true),
+            ("issaczhuang.muzzleflash", "Gun_SMG", null, () => true),
+            ("issaczhuang.muzzleflash", "SmartMG", null, () => true),
+            ("issaczhuang.muzzleflash", "Gun_SmartSniperRifle", null, () => true),
+            ("issaczhuang.muzzleflash", "Gun_NestMMG", null, () => true),
+            ("issaczhuang.muzzleflash", "Gun_NestMissile", null, () => true),
             // Vanilla Weapons Expanded moved its musket and flintlock to Medieval 2.
             ("issaczhuang.muzzleflash", "VWE_Gun_Musket", "VFEM2_Gun_Musket", () => Active("OskarPotocki.VFE.Medieval2")),
             ("issaczhuang.muzzleflash", "VWE_Gun_Flintlock", "VFEM2_Gun_Flintlock", () => Active("OskarPotocki.VFE.Medieval2")),

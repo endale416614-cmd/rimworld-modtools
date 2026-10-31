@@ -399,6 +399,19 @@ namespace LP17Hotfix
                 foreach (int x in Ticks(30)) yield return x;
             }
 
+            Mark("regressions");
+            Guard("firefoam on a thing that never burned", () =>
+            {
+                Thing unburned = map.listerThings.AllThings.First(t => t.TryGetComp<CompAttachBase>() is CompAttachBase c && c.attachments == null);
+                Log.Message("[PROBE] firefoam on " + unburned);
+                DamageDefOf.Extinguish.Worker.Apply(new DamageInfo(DamageDefOf.Extinguish, 1f), unburned);
+            });
+            Guard("hive search for a pawn with no map", () =>
+            {
+                object hive = AccessTools.Method(typeof(LordToil_HiveRelated), "FindClosestHive").Invoke(new LordToil_DefendAndExpandHive(), new object[] { PawnGenerator.GeneratePawn(PawnKindDefOf.Colonist) });
+                Log.Message("[PROBE] hive for a pawn with no map: " + (hive ?? "none"));
+            });
+
             Mark("long ticks");
             foreach (int x in Ticks(6000)) yield return x;
         }
