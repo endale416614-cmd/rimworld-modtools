@@ -47,4 +47,31 @@
 			</value>
 		</match>
 	</Operation>
+	<!-- comp-props-class: these comps read typed properties, so the plain class in the def throws InvalidCastException. A
+	     bare CompReportWorkSpeed (Fortifications Medieval Material's gathering spot) throws whenever it is inspected; a
+	     CompUseEffect_DestroySelf on plain CompProperties_UseEffect (More Archotech Garbage's cores) throws when used. -->
+	<Operation Class="PatchOperationConditional">
+		<xpath>Defs/ThingDef/comps/li[not(@Class) and compClass="CompReportWorkSpeed"]</xpath>
+		<match Class="PatchOperationAttributeSet">
+			<xpath>Defs/ThingDef/comps/li[not(@Class) and compClass="CompReportWorkSpeed"]</xpath>
+			<attribute>Class</attribute>
+			<value>CompProperties_ReportWorkSpeed</value>
+		</match>
+	</Operation>
+	<Operation Class="PatchOperationConditional">
+		<xpath>Defs/ThingDef/comps/li[@Class="CompProperties_UseEffect" and compClass="CompUseEffect_DestroySelf"]</xpath>
+		<match Class="PatchOperationAttributeSet">
+			<xpath>Defs/ThingDef/comps/li[@Class="CompProperties_UseEffect" and compClass="CompUseEffect_DestroySelf"]</xpath>
+			<attribute>Class</attribute>
+			<value>CompProperties_UseEffectDestroySelf</value>
+		</match>
+	</Operation>
+	<!-- rebuild-glassdoor-graphic: ReBuild's glass autodoor adds an extra door graphic and a toggle for it, but the mod ships
+	     no GlassAutodoor_VanillaMenuIcon texture, so selecting the door logs a load error. Drop the comp that needs it. -->
+	<Operation Class="PatchOperationConditional">
+		<xpath>Defs/ThingDef[defName="RB_GlassAutodoor"]/comps/li[toggleIcon="Things/Building/RB_Door/GlassAutodoor_VanillaMenuIcon"]</xpath>
+		<match Class="PatchOperationRemove">
+			<xpath>Defs/ThingDef[defName="RB_GlassAutodoor"]/comps/li[toggleIcon="Things/Building/RB_Door/GlassAutodoor_VanillaMenuIcon"]</xpath>
+		</match>
+	</Operation>
 </Patch>

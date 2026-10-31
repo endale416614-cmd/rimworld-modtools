@@ -15,6 +15,11 @@
     <HarmonyDll Condition="Exists('$(RWDir)\Mods\00-core__brrainz.harmony\1.7\Assemblies\0Harmony.dll')">$(RWDir)\Mods\00-core__brrainz.harmony\1.7\Assemblies\0Harmony.dll</HarmonyDll>
     <HarmonyDll Condition="'$(HarmonyDll)' == ''">F:\Steam\steamapps\workshop\content\294100\2009463077\1.7\Assemblies\0Harmony.dll</HarmonyDll>
   </PropertyGroup>
+  <ItemGroup Condition="'$(Probe)' == 'true'">
+    <Compile Include="..\probe\Probe.cs" />
+    <Reference Include="System.Linq"><HintPath>$(RWDir)\System.Linq.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="System.Runtime.Extensions"><HintPath>$(RWDir)\System.Runtime.Extensions.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
   <ItemGroup>
     <Reference Include="System.Private.CoreLib"><HintPath>$(RWDir)\System.Private.CoreLib.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="System.Runtime"><HintPath>$(RWDir)\System.Runtime.dll</HintPath><Private>false</Private></Reference>

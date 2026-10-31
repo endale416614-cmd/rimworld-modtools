@@ -60,8 +60,111 @@ namespace LP17Hotfix
             SpacerShieldsDebugLine.Apply();
             LayerConnectionPostLoad.Apply();
             IsekaiTileNotices.Apply();
+            VefHeavyWeaponUnspawned.Apply();
+            ApparelSetWearRules.Apply();
+            WandererJoinNewTemp.Apply();
+            ArtilleryUnmannedGizmo.Apply();
+            InsectGlideJob.Apply();
         }
     }
+
+    static class WandererJoinNewTemp
+    {
+        // 1.7 made RunInt call GeneratePawn_NewTemp, whose default returns null instead of falling back to GeneratePawn.
+        // Mods that override only the old method (Mime, Chestburst) then get a null pawn: the quest fails and its broken
+        // parts throw in every later reward quest. Overriding mods skip this base method, so only they reach the fallback.
+        internal static void Apply() => Lp.Run("wanderer-join-newtemp", () =>
+        {
+            new Harmony(Lp.Id).Patch(AccessTools.Method(typeof(RimWorld.QuestGen.QuestNode_Root_WandererJoin), "GeneratePawn_NewTemp"), postfix: new HarmonyMethod(typeof(WandererJoinNewTemp), nameof(Postfix)));
+            return null;
+        });
+
+        static void Postfix(RimWorld.QuestGen.QuestNode_Root_WandererJoin __instance, ref Pawn __result)
+        {
+            if (__result == null) __result = __instance.GeneratePawn();
+        }
+    }
+
+    static class ArtilleryUnmannedGizmo
+    {
+        // CompWorldArtillery assumes its parent is a VFE Security Building_Artillery. Fortifications' Hex Mortar, Prince and
+        // Emperor carry the comp on another turret class, so its gizmo throws whenever one is selected. World targeting
+        // cannot work on them, so they get no gizmo.
+        static Type artillery;
+
+        internal static void Apply() => Lp.Run("artillery-unmanned-gizmo", () =>
+        {
+            Type t = AccessTools.TypeByName("VFESecurity.CompWorldArtillery");
+            artillery = AccessTools.TypeByName("VFESecurity.Building_Artillery");
+            if (t == null || artillery == null) return "VFE Security not loaded";
+            new Harmony(Lp.Id).Patch(AccessTools.Method(t, "CompGetGizmosExtra"), postfix: new HarmonyMethod(typeof(ArtilleryUnmannedGizmo), nameof(Postfix)));
+            return null;
+        });
+
+        static void Postfix(ThingComp __instance, ref IEnumerable<Gizmo> __result)
+        {
+            if (!artillery.IsInstanceOfType(__instance.parent)) __result = Array.Empty<Gizmo>();
+        }
+    }
+
+    static class InsectGlideJob
+    {
+        // The glide ability starts a Goto on landing with lastJobEndCondition None while the pawn still has a job, which the
+        // game answers with a warning before ending that job anyway. Say the old job was interrupted.
+        internal static void Apply() => Lp.Run("insect-glide-job", () =>
+        {
+            MethodInfo m = AccessTools.Method("VFEInsectoids.CompAbilityInsectGlide:OnJumpCompleted");
+            if (m == null) return "VFE Insectoids glide not found";
+            new Harmony(Lp.Id).Patch(m, transpiler: new HarmonyMethod(typeof(InsectGlideJob), nameof(Transpiler)));
+            return null;
+        });
+
+        static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> code)
+        {
+            List<CodeInstruction> list = new List<CodeInstruction>(code);
+            for (int i = 1; i < list.Count; i++)
+            {
+                if (list[i].opcode == OpCodes.Ldc_I4_0 && list[i - 1].operand is MethodInfo mi && mi.Name == "MakeJob")
+                {
+                    list[i].opcode = OpCodes.Ldc_I4;
+                    list[i].operand = (int)Verse.AI.JobCondition.InterruptForced;
+                    return list;
+                }
+            }
+            throw new InvalidOperationException("StartJob argument not found");
+        }
+    }
+
+    static class VefHeavyWeaponUnspawned
+    {
+        // VEF drops a heavy weapon when the armour it needs comes off. VFE Pirates swaps a warcasket pawn's apparel during
+        // generation, before the pawn has a position, so the drop fails with an error. An unspawned pawn has nowhere to drop to.
+        internal static void Apply() => Lp.Run("vef-heavyweapon-unspawned", () =>
+        {
+            MethodInfo m = AccessTools.Method("VEF.Weapons.VanillaExpandedFramework_Pawn_ApparelTracker_Notify_ApparelRemoved_Patch:Postfix");
+            if (m == null) return "VEF heavy weapon hook not found";
+            new Harmony(Lp.Id).Patch(m, prefix: new HarmonyMethod(typeof(VefHeavyWeaponUnspawned), nameof(Prefix)));
+            return null;
+        });
+
+        static bool Prefix(RimWorld.Pawn_ApparelTracker __0) => __0.pawn.Spawned;
+    }
+
+    static class ApparelSetWearRules
+    {
+        // The generator's warmth and toxic steps add clothes after checking gender only, not PawnCanWear, so a mod's wear
+        // rule (Fairycore's female-only dresses) rejects them at hand-over with a warning. Drop them before that.
+        internal static void Apply() => Lp.Run("apparel-set-wear-rules", () =>
+        {
+            MethodInfo m = AccessTools.Method("RimWorld.PawnApparelGenerator+PossibleApparelSet:GiveToPawn");
+            if (m == null) return "GiveToPawn not found";
+            new Harmony(Lp.Id).Patch(m, prefix: new HarmonyMethod(typeof(ApparelSetWearRules), nameof(Prefix)));
+            return null;
+        });
+
+        static void Prefix(List<RimWorld.ThingStuffPair> ___aps, Pawn pawn) => ___aps.RemoveAll(p => !p.thing.apparel.PawnCanWear(pawn, true));
+    }
+
 
     static class IsekaiTileNotices
     {
