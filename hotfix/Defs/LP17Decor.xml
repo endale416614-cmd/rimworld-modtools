@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Defs>
+	<!-- dungeon-decor-copies: Dismantle Ancient Junk gives these ancient things a cost list so they can be dismantled for
+	     materials. Isekai Dungeons rejects decor that pays out, so its Ruins and Foundry sets place these copies instead.
+	     They look the same and pay nothing; the originals keep the refund everywhere else. -->
+	<ThingDef ParentName="BuildingBase">
+		<defName>LP17_Decor_AncientCrate</defName>
+		<label>ancient crate</label>
+		<description>An ancient, broken crate. Any valuables it once contained have degraded to uselessness.</description>
+		<noRightClickDraftAttack>true</noRightClickDraftAttack>
+		<graphicData>
+			<texPath>Things/Building/Ruins/AncientCrate</texPath>
+			<graphicClass>Graphic_Random</graphicClass>
+			<drawSize>(1,1)</drawSize>
+			<shadowData>
+				<volume>(1, 0.5, 1)</volume>
+			</shadowData>
+		</graphicData>
+		<size>(1, 1)</size>
+		<fillPercent>0.30</fillPercent>
+		<altitudeLayer>Building</altitudeLayer>
+		<rotatable>false</rotatable>
+		<statBases>
+			<MaxHitPoints>100</MaxHitPoints>
+			<WorkToBuild>300</WorkToBuild>
+			<Flammability>0.5</Flammability>
+		</statBases>
+		<passability>PassThroughOnly</passability>
+		<pathCost>50</pathCost>
+		<building>
+			<canLandGravshipOn>true</canLandGravshipOn>
+			<isInert>true</isInert>
+		</building>
+	</ThingDef>
+
+	<ThingDef ParentName="BuildingBase">
+		<defName>LP17_Decor_AncientBarrel</defName>
+		<label>ancient barrel</label>
+		<description>An ancient, broken barrel that looks like it once contained waste of some sort.</description>
+		<rotatable>false</rotatable>
+		<noRightClickDraftAttack>true</noRightClickDraftAttack>
+		<graphicData>
+			<texPath>Things/Building/Ruins/AncientBarrel</texPath>
+			<graphicClass>Graphic_Random</graphicClass>
+			<drawSize>(1,1)</drawSize>
+			<shadowData>
+				<volume>(0.5, 0.5, 0.5)</volume>
+			</shadowData>
+		</graphicData>
+		<size>(1, 1)</size>
+		<fillPercent>0.30</fillPercent>
+		<altitudeLayer>Building</altitudeLayer>
+		<statBases>
+			<MaxHitPoints>50</MaxHitPoints>
+			<WorkToBuild>200</WorkToBuild>
+			<Flammability>0.7</Flammability>
+		</statBases>
+		<passability>PassThroughOnly</passability>
+		<pathCost>50</pathCost>
+		<building>
+			<canLandGravshipOn>true</canLandGravshipOn>
+			<isInert>true</isInert>
+		</building>
+	</ThingDef>
+
+	<ThingDef ParentName="BuildingBase">
+		<defName>LP17_Decor_AncientLamp</defName>
+		<label>ancient lamp</label>
+		<description>An ancient self-powered lamp. Its internal power supply is badly depleted, but it still emits a dim glow.</description>
+		<altitudeLayer>Building</altitudeLayer>
+		<passability>PassThroughOnly</passability>
+		<selectable>true</selectable>
+		<fillPercent>0.20</fillPercent>
+		<pathCost>14</pathCost>
+		<leaveResourcesWhenKilled>false</leaveResourcesWhenKilled>
+		<soundImpactDefault>BulletImpact_Metal</soundImpactDefault>
+		<rotatable>false</rotatable>
+		<noRightClickDraftAttack>true</noRightClickDraftAttack>
+		<graphicData>
+			<graphicClass>Graphic_Single</graphicClass>
+			<texPath>Things/Building/Ruins/AncientLamp</texPath>
+		</graphicData>
+		<comps>
+			<li Class="CompProperties_Glower">
+				<glowRadius>5.5</glowRadius>
+				<glowColor>(71,43,6,0)</glowColor>
+			</li>
+		</comps>
+		<statBases>
+			<MaxHitPoints>50</MaxHitPoints>
+			<Flammability>0.5</Flammability>
+		</statBases>
+		<building>
+			<canLandGravshipOn>true</canLandGravshipOn>
+			<isInert>true</isInert>
+		</building>
+	</ThingDef>
+
+	<ThingDef ParentName="AncientEmergencyLightBase" MayRequire="Ludeon.RimWorld.Odyssey">
+		<defName>LP17_Decor_EmergencyLight_Red</defName>
+		<label>ancient emergency light</label>
+		<leaveResourcesWhenKilled>false</leaveResourcesWhenKilled>
+		<costList Inherit="False" />
+		<killedLeavings Inherit="False" />
+		<comps>
+			<li Class="CompProperties_Glower">
+				<glowRadius>11</glowRadius>
+				<glowColor>(224, 54, 54, 0)</glowColor>
+			</li>
+		</comps>
+	</ThingDef>
+
+	<ThingDef ParentName="AncientEmergencyLightBase" MayRequire="Ludeon.RimWorld.Odyssey">
+		<defName>LP17_Decor_EmergencyLight_Green</defName>
+		<label>mechanoid light</label>
+		<description>A light used in mechanoid facilities. The green hue is optimal for mechanoid optical arrays.</description>
+		<leaveResourcesWhenKilled>false</leaveResourcesWhenKilled>
+		<costList Inherit="False" />
+		<killedLeavings Inherit="False" />
+		<comps>
+			<li Class="CompProperties_Glower">
+				<glowRadius>11</glowRadius>
+				<glowColor>(216, 219, 67, 0)</glowColor>
+			</li>
+		</comps>
+	</ThingDef>
+</Defs>

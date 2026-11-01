@@ -1,7 +1,7 @@
 # Runs the test-only probe build of LP17 Hotfix (probe\Probe.cs): swaps the DLL in, turns dev mode on, launches,
 # waits for "[PROBE] done", kills the game, then restores the DLL and Prefs.xml. Saves nothing to the save folder.
 param(
-    [Parameter(Mandatory)][ValidateSet('static', 'soak')][string]$Mode,
+    [Parameter(Mandatory)][ValidateSet('static', 'soak', 'dump', 'gear')][string]$Mode,
     [string]$Save = '',
     [Parameter(Mandatory)][string]$OutLog,
     [string]$OutTable = '',
@@ -15,6 +15,11 @@ $prefs = Join-Path $userDir 'Config\Prefs.xml'
 $live = Join-Path $gameDir 'Mods\16-compat__local.lp17.hotfix\1.7\Assemblies\LP17Hotfix.dll'
 $build = Join-Path $PSScriptRoot '..\hotfix\bin\ProbeBuild\LP17Hotfix.dll'
 if (Get-Process -Name RimWorld -ErrorAction SilentlyContinue) { 'RimWorld already running; not starting'; exit 3 }
+# With no workshop items (Steam on another account) Harmony is missing, the load fails and the game resets ModsConfig.xml.
+$subs = Select-String -Path 'F:\Steam\logs\workshop_log.txt' -Pattern '\[AppID 294100\].*Number of items: (\d+)' | Select-Object -Last 1
+if ($subs -and [int]$subs.Matches[0].Groups[1].Value -eq 0) { 'Steam account has no RimWorld subscriptions; not starting'; exit 4 }
+$modsConfig = Join-Path $userDir 'Config\ModsConfig.xml'
+$modsConfigText = [IO.File]::ReadAllBytes($modsConfig)
 $prefsText = [IO.File]::ReadAllBytes($prefs)
 $liveDll = [IO.File]::ReadAllBytes($live)
 $verdict = 'timeout'
@@ -40,6 +45,7 @@ try {
 }
 finally {
     [IO.File]::WriteAllBytes($prefs, $prefsText)
+    [IO.File]::WriteAllBytes($modsConfig, $modsConfigText)
     [IO.File]::WriteAllBytes($live, $liveDll)
 }
 "VERDICT $verdict after $([int]((Get-Date) - $start).TotalSeconds)s"

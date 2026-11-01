@@ -1,5 +1,7 @@
 // Test-only build of LP17 Hotfix (dotnet build -p:Probe=true). Env LP17_PROBE selects the scan:
 //   static : JIT every active mod method, check Harmony targets, dump the patch table to LP17_PROBE_OUT.
+//   dump   : write every faction, pawn kind, weapon and apparel def to LP17_PROBE_OUT.<table>.tsv.
+//   gear   : load LP17_PROBE_SAVE, generate every faction's pawn kinds and visitor group, write what they wear and carry to LP17_PROBE_OUT.gear.tsv.
 //   soak   : load LP17_PROBE_SAVE, autosave off, open UI tabs, build every def, generate pawn kinds, spawn things,
 //            fire incidents and quests, then run ticks. The game is killed afterwards and never saved.
 // Every line starts with [PROBE so harness/proberun.ps1 can attribute errors to the step before them.
@@ -26,8 +28,8 @@ namespace LP17Hotfix
         static Probe()
         {
             if (string.IsNullOrEmpty(mode)) return;
-            if (mode == "static") new Harmony("local.lp17.probe").Patch(AccessTools.Method(typeof(Root_Entry), "Update"), postfix: new HarmonyMethod(typeof(Probe), nameof(MenuFrame)));
-            else if (mode == "soak")
+            if (mode == "static" || mode == "dump") new Harmony("local.lp17.probe").Patch(AccessTools.Method(typeof(Root_Entry), "Update"), postfix: new HarmonyMethod(typeof(Probe), nameof(MenuFrame)));
+            else if (mode == "soak" || mode == "gear")
             {
                 Harmony h = new Harmony("local.lp17.probe");
                 h.Patch(AccessTools.Method(typeof(Autosaver), "AutosaverTick"), prefix: new HarmonyMethod(typeof(Probe), nameof(No)));
@@ -45,7 +47,59 @@ namespace LP17Hotfix
         static void MenuFrame()
         {
             if (LongEventHandler.AnyEventNowOrWaiting || ++menuFrames != 600) return;
-            StaticScan();
+            if (mode == "dump") Dump();
+            else StaticScan();
+        }
+
+        // ---- def dump ----
+
+        static string Cell(object o) => (o?.ToString() ?? "").Replace('\t', ' ').Replace('\r', ' ').Replace('\n', ' ');
+
+        static string Join<T>(IEnumerable<T> items) => items == null ? "" : string.Join(",", items);
+
+        static void Table(string name, string[] head, IEnumerable<object[]> rows)
+        {
+            using (StreamWriter w = new StreamWriter(outPath + "." + name + ".tsv"))
+            {
+                w.WriteLine(string.Join("\t", head));
+                foreach (object[] r in rows) w.WriteLine(string.Join("\t", r.Select(Cell)));
+            }
+        }
+
+        static string Options(List<PawnGenOption> list) => list == null ? "" : string.Join(",", list.Select(o => o.kind?.defName + "*" + o.selectionWeight));
+
+        static string Groups(FactionDef f) => f.pawnGroupMakers == null ? "" : string.Join(";", f.pawnGroupMakers.Select(g => g.kindDef?.defName + "[o=" + Options(g.options) + " t=" + Options(g.traders) + " c=" + Options(g.carriers) + " g=" + Options(g.guards) + "]"));
+
+        static string Research(ThingDef d) => Join(d.recipeMaker?.researchPrerequisites?.Select(r => r.defName) ?? (d.recipeMaker?.researchPrerequisite != null ? new[] { d.recipeMaker.researchPrerequisite.defName } : null));
+
+        static string WornBodies(ThingDef d)
+        {
+            string path = d.apparel?.wornGraphicPath;
+            if (path.NullOrEmpty()) return "none";
+            if (d.apparel.LastLayer == ApparelLayerDefOf.Overhead || d.apparel.LastLayer == ApparelLayerDefOf.EyeCover) return "any";
+            string[] bodies = { "Male", "Female", "Thin", "Hulk", "Fat" };
+            return Join(bodies.Where(b => ContentFinder<UnityEngine.Texture2D>.Get(path + "_" + b + "_south", false) != null));
+        }
+
+        static void Dump()
+        {
+            try
+            {
+                Table("factions", new[] { "defName", "label", "mod", "tech", "hidden", "humanlike", "permanentEnemy", "isPlayer", "categoryTag", "groups" },
+                    DefDatabase<FactionDef>.AllDefs.Select(f => new object[] { f.defName, f.label, f.modContentPack?.PackageIdPlayerFacing, f.techLevel, f.hidden, f.humanlikeFaction, f.permanentEnemy, f.isPlayer, f.categoryTag, Groups(f) }));
+                Table("kinds", new[] { "defName", "label", "mod", "race", "power", "apparelMoney", "weaponMoney", "apparelTags", "apparelDisallow", "weaponTags", "fighter", "leader", "trader", "fixedGender", "required", "specific", "defaultFaction" },
+                    DefDatabase<PawnKindDef>.AllDefs.Select(k => new object[] { k.defName, k.label, k.modContentPack?.PackageIdPlayerFacing, k.race?.defName, k.combatPower, k.apparelMoney, k.weaponMoney, Join(k.apparelTags), Join(k.apparelDisallowTags), Join(k.weaponTags), k.isFighter, k.factionLeader, k.trader, k.fixedGender, Join(k.apparelRequired?.Select(t => t.defName)), Join(k.specificApparelRequirements?.Select(t => t.ApparelDef?.defName)), k.defaultFactionDef?.defName }));
+                Table("apparel", new[] { "defName", "label", "mod", "tech", "apparelTags", "tradeTags", "layers", "parts", "gender", "stuff", "sharp", "blunt", "cold", "value", "categories", "research", "bodies", "graphic", "stages", "desc" },
+                    DefDatabase<ThingDef>.AllDefs.Where(d => d.IsApparel).Select(d => new object[] { d.defName, d.label, d.modContentPack?.PackageIdPlayerFacing, d.techLevel, Join(d.apparel.tags), Join(d.tradeTags), Join(d.apparel.layers?.Select(l => l.defName)), Join(d.apparel.bodyPartGroups?.Select(g => g.defName)), d.apparel.gender, d.MadeFromStuff, d.GetStatValueAbstract(StatDefOf.ArmorRating_Sharp), d.GetStatValueAbstract(StatDefOf.ArmorRating_Blunt), d.GetStatValueAbstract(StatDefOf.Insulation_Cold), d.BaseMarketValue, Join(d.thingCategories?.Select(c => c.defName)), Research(d), WornBodies(d), d.apparel.wornGraphicPath, d.apparel.developmentalStageFilter, d.description?.Length > 110 ? d.description.Substring(0, 110) : d.description }));
+                Table("weapons", new[] { "defName", "label", "mod", "tech", "weaponTags", "tradeTags", "classes", "kind", "value", "destroyOnDrop", "stuff", "categories", "research", "range", "damage", "burst", "desc" },
+                    DefDatabase<ThingDef>.AllDefs.Where(d => d.IsWeapon && d.equipmentType == EquipmentType.Primary).Select(d =>
+                    {
+                        VerbProperties v = d.Verbs?.FirstOrDefault(x => x.isPrimary) ?? d.Verbs?.FirstOrDefault();
+                        return new object[] { d.defName, d.label, d.modContentPack?.PackageIdPlayerFacing, d.techLevel, Join(d.weaponTags), Join(d.tradeTags), Join(d.weaponClasses?.Select(c => c.defName)), d.IsRangedWeapon ? "ranged" : "melee", d.BaseMarketValue, d.destroyOnDrop, d.MadeFromStuff, Join(d.thingCategories?.Select(c => c.defName)), Research(d), v?.range, v?.defaultProjectile?.projectile?.GetDamageAmount((Thing)null), v?.burstShotCount, d.description?.Length > 110 ? d.description.Substring(0, 110) : d.description };
+                    }));
+            }
+            catch (Exception e) { Log.Error("[PROBE] dump failed: " + e); }
+            Log.Message("[PROBE] done");
         }
 
         // ---- static scan ----
@@ -243,7 +297,7 @@ namespace LP17Hotfix
             Log.ResetMessageCount();
             foreach (Window w in Find.WindowStack.Windows.ToList())
                 if (w.forcePause || w is Dialog_MessageBox) w.Close(false);
-            if (run == null) { Log.Message("[PROBE] playing"); run = Soak().GetEnumerator(); }
+            if (run == null) { Log.Message("[PROBE] playing"); run = (mode == "gear" ? Gear() : Soak()).GetEnumerator(); }
             Stopwatch sw = Stopwatch.StartNew();
             try
             {
@@ -272,6 +326,52 @@ namespace LP17Hotfix
             {
                 Guard("tick", () => Find.TickManager.DoSingleTick());
                 yield return 0;
+            }
+        }
+
+        static IEnumerable<int> Gear()
+        {
+            Map map = Find.AnyPlayerHomeMap;
+            using (StreamWriter w = new StreamWriter(outPath + ".gear.tsv"))
+            {
+                w.WriteLine("faction\tkind\tgroup\tgender\tbody\tweapon\tapparel");
+                void Record(RimWorld.FactionDef f, Pawn p, string group)
+                {
+                    w.WriteLine(string.Join("\t", new object[] { f.defName, p.kindDef.defName, group, p.gender, p.story?.bodyType?.defName, p.equipment?.Primary?.def.defName, Join(p.apparel?.WornApparel.Select(a => a.def.defName)) }.Select(Cell)));
+                }
+                foreach (RimWorld.FactionDef f in DefDatabase<RimWorld.FactionDef>.AllDefs.ToList())
+                {
+                    if (!f.humanlikeFaction || f.isPlayer || f.pawnGroupMakers.NullOrEmpty()) continue;
+                    Mark("faction " + f.defName);
+                    Faction fac = Find.FactionManager.FirstFactionOfDef(f);
+                    Guard("make " + f.defName, () => { if (fac == null) fac = FactionGenerator.NewGeneratedFaction(new FactionGeneratorParms(f)); });
+                    if (fac == null) continue;
+                    foreach (PawnKindDef k in f.pawnGroupMakers.SelectMany(g => g.options.Concat(g.traders ?? new List<PawnGenOption>()).Concat(g.guards ?? new List<PawnGenOption>())).Select(o => o.kind).Distinct().ToList())
+                    {
+                        if (k?.race == null || !k.RaceProps.Humanlike) continue;
+                        for (int i = 0; i < 6; i++)
+                            Guard("pawn " + f.defName + "/" + k.defName, () =>
+                            {
+                                Pawn p = PawnGenerator.GeneratePawn(new PawnGenerationRequest(k, fac, PawnGenerationContext.NonPlayer, forceGenerateNewPawn: true));
+                                Record(f, p, "kind");
+                                p.Discard(true);
+                            });
+                        yield return 0;
+                    }
+                    if (f.pawnGroupMakers.Any(g => g.kindDef == PawnGroupKindDefOf.Peaceful))
+                        for (int i = 0; i < 4; i++)
+                        {
+                            Guard("visitors " + f.defName, () =>
+                            {
+                                foreach (Pawn p in PawnGroupMakerUtility.GeneratePawns(new PawnGroupMakerParms { groupKind = PawnGroupKindDefOf.Peaceful, tile = map.Tile, faction = fac, points = 500f }, false).ToList())
+                                {
+                                    Record(f, p, "visitor");
+                                    p.Discard(true);
+                                }
+                            });
+                            yield return 0;
+                        }
+                }
             }
         }
 

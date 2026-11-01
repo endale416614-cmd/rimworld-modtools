@@ -70,7 +70,70 @@ namespace LP17Hotfix
             InsectGlideJob.Apply();
             VefExtinguishNoAttachments.Apply();
             HiveLookupNoMap.Apply();
+            AnimeVisitorsOnly.Apply();
         }
+    }
+
+    static class AnimeVisitorsOnly
+    {
+        // The anime style packs tag their clothes for ordinary generation (some even as royal wear), so any pawn could get them.
+        // yc's Faction Editor assigns them to visitors by name, so a tag every pawn kind refuses keeps them off everyone else.
+        // Visitor groups then use kinds of their own, because the kinds they used also appear in raids and settlements.
+        static readonly HashSet<string> Packs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "mlmlmlm.cosplayequipmentbluearchive", "mlmlmlm.cosplayapparelgenshinimpact", "mlmlmlm.cosplayapparelazurlane", "mlmlmlm.cosplayapparelhonkaistarrail",
+            "mlmlmlm.cosplayapparelUmamusumePrettyDerby", "mlmlmlm.cosplayapparelprincessconnect", "mlmlmlm.cosplayapparelcounterside", "mlmlmlm.cosplayequipmentgoddessofvictorynikke",
+            "mlmlmlm.cosplayapparelwutheringwaves", "mlmlmlm.cosplayapparelzenlesszonezero", "mlmlmlm.cosplayappareleternalreturn", "mlmlmlm.cosplayapparelcodevein",
+            "mlmlmlm.cosplayapparelgranbluefantasy", "RF.BanGDream.MYGOStylePack", "Mihoyo.GenshinImpact.CharacterStyles", "Mihoyo.ZenlessZoneZero.CharacterStyles",
+            "Kuro.WutheringWaves.CharacterStyles", "Snowbreak.ContainmentZone.CharacterStyles", "RicoFox233.NL.GFPack", "RicoFox233.PTWZZ.GFPack", "RicoFox233.PTC.GFPack",
+            "RicoFox233.PTCYL.GFPack", "RicoFox233.PNC.GFYTPack", "RicoFox233.GirlsFrontline.DEFYTeam", "RicoFox233.GirlsFrontline.ARTeam", "RicoFox233.TouhouStyle.Youyoumu",
+            "RicoFox233.BTR.StylePack", "RicoFox233.MIA.WhiteflutePack", "RicoFox233.yuzu.LLLJCharacterStyles", "RicoFox.apparel.MGWTPack", "RF.ATELIERSOPHIE.CharacterStyles",
+            "Jupiter.EXILIUM", "Jupiter.madeinabyss", "zx.costumes", "MO.Size.Valentine.Apparel", "ponpeco.PonpecoAccessories",
+        };
+
+        static readonly HashSet<string> VisitorFactions = new HashSet<string>
+        {
+            "TribeCivil", "TribeRough", "TribeSavage", "TribeCannibal", "TribeRoughNeanderthal", "TribeSavageImpid", "NudistTribe", "VFEM2_CivilClan", "VFEM2_ClanRough",
+            "VFEM2_ClanSavage", "VFEM2_KingdomCivil", "VFEM2_KingdomRough", "VFEM2_KingdomSavage", "VFEM2_MerchantGuild", "OutlanderCivil", "OutlanderRough", "OutlanderRoughPig",
+            "VRESaurids_OutlanderRoughSaurid", "SettlerCivil", "SettlerRough", "SettlerSavage", "VFEP_Mercenaries", "TradersGuild", "GuildFaction_AdventurersGuild", "SpacerCivil", "SpacerRough",
+        };
+
+        internal static void Apply() => Lp.Run("anime-visitors-only", () =>
+        {
+            const string tag = "LP17_VisitorsOnly";
+            PawnKindDef visitor = DefDatabase<PawnKindDef>.GetNamedSilentFail("LP17_Visitor");
+            PawnKindDef guard = DefDatabase<PawnKindDef>.GetNamedSilentFail("LP17_VisitorGuard");
+            PawnKindDef elite = DefDatabase<PawnKindDef>.GetNamedSilentFail("LP17_VisitorElite");
+            if (visitor == null || guard == null || elite == null) return "visitor kinds not found";
+            int items = 0, options = 0;
+            foreach (ThingDef d in DefDatabase<ThingDef>.AllDefs)
+            {
+                if (!d.IsApparel || d.modContentPack == null || !Packs.Contains(d.modContentPack.PackageIdPlayerFacing)) continue;
+                (d.apparel.tags ?? (d.apparel.tags = new List<string>())).Add(tag);
+                d.apparel.tags.Remove("BestowerHood"); // kinds that require this tag ignore the refusal
+                items++;
+            }
+            foreach (ThingDef d in DefDatabase<ThingDef>.AllDefs)
+                if (d.IsWeapon && d.modContentPack != null && Packs.Contains(d.modContentPack.PackageIdPlayerFacing)) d.weaponTags = null;
+            foreach (PawnKindDef k in DefDatabase<PawnKindDef>.AllDefs)
+                (k.apparelDisallowTags ?? (k.apparelDisallowTags = new List<string>())).Add(tag);
+            foreach (RimWorld.FactionDef f in DefDatabase<RimWorld.FactionDef>.AllDefs)
+            {
+                if (f.pawnGroupMakers == null || !VisitorFactions.Contains(f.defName)) continue;
+                foreach (RimWorld.PawnGroupMaker g in f.pawnGroupMakers)
+                {
+                    if (g.kindDef != RimWorld.PawnGroupKindDefOf.Peaceful || g.options == null) continue;
+                    foreach (RimWorld.PawnGenOption o in g.options)
+                    {
+                        if (o.kind?.race == null || !o.kind.RaceProps.Humanlike || o.kind.defName.Contains("Child")) continue;
+                        o.kind = o.kind.combatPower < 60f ? visitor : o.kind.combatPower < 100f ? guard : elite;
+                        options++;
+                    }
+                }
+            }
+            Lp.Note = items + " items, " + options + " visitor group entries";
+            return null;
+        });
     }
 
     static class VefExtinguishNoAttachments

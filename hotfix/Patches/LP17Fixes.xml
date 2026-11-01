@@ -74,4 +74,51 @@
 			<xpath>Defs/ThingDef[defName="RB_GlassAutodoor"]/comps/li[toggleIcon="Things/Building/RB_Door/GlassAutodoor_VanillaMenuIcon"]</xpath>
 		</match>
 	</Operation>
+	<!-- dungeon-decor-copies: Isekai Dungeons rejects decor that refunds materials, and Dismantle Ancient Junk gives these things
+	     a cost list. Dungeons place the refund-free copies in Defs/LP17Decor.xml instead. -->
+	<Operation Class="PatchOperationConditional">
+		<xpath>Defs/IsekaiDungeons.DungeonDecorSetDef/entries/li/thing[text()="AncientCrate"]</xpath>
+		<match Class="PatchOperationReplace">
+			<xpath>Defs/IsekaiDungeons.DungeonDecorSetDef/entries/li/thing[text()="AncientCrate"]</xpath>
+			<value>
+				<thing>LP17_Decor_AncientCrate</thing>
+			</value>
+		</match>
+	</Operation>
+	<Operation Class="PatchOperationConditional">
+		<xpath>Defs/IsekaiDungeons.DungeonDecorSetDef/entries/li/thing[text()="AncientBarrel"]</xpath>
+		<match Class="PatchOperationReplace">
+			<xpath>Defs/IsekaiDungeons.DungeonDecorSetDef/entries/li/thing[text()="AncientBarrel"]</xpath>
+			<value>
+				<thing>LP17_Decor_AncientBarrel</thing>
+			</value>
+		</match>
+	</Operation>
+	<Operation Class="PatchOperationConditional">
+		<xpath>Defs/IsekaiDungeons.DungeonDecorSetDef/entries/li/thing[text()="AncientLamp"]</xpath>
+		<match Class="PatchOperationReplace">
+			<xpath>Defs/IsekaiDungeons.DungeonDecorSetDef/entries/li/thing[text()="AncientLamp"]</xpath>
+			<value>
+				<thing>LP17_Decor_AncientLamp</thing>
+			</value>
+		</match>
+	</Operation>
+	<Operation Class="PatchOperationConditional">
+		<xpath>Defs/IsekaiDungeons.DungeonDecorSetDef/entries/li/thing[text()="AncientEmergencyLight_Red"]</xpath>
+		<match Class="PatchOperationReplace">
+			<xpath>Defs/IsekaiDungeons.DungeonDecorSetDef/entries/li/thing[text()="AncientEmergencyLight_Red"]</xpath>
+			<value>
+				<thing>LP17_Decor_EmergencyLight_Red</thing>
+			</value>
+		</match>
+	</Operation>
+	<Operation Class="PatchOperationConditional">
+		<xpath>Defs/IsekaiDungeons.DungeonDecorSetDef/entries/li/thing[text()="AncientEmergencyLight_Green"]</xpath>
+		<match Class="PatchOperationReplace">
+			<xpath>Defs/IsekaiDungeons.DungeonDecorSetDef/entries/li/thing[text()="AncientEmergencyLight_Green"]</xpath>
+			<value>
+				<thing>LP17_Decor_EmergencyLight_Green</thing>
+			</value>
+		</match>
+	</Operation>
 </Patch>

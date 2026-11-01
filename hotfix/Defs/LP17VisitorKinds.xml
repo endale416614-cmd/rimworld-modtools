@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Defs>
+	<!-- anime-visitors-only: pawn kinds used only in visitor groups, so yc's Faction Editor can dress visitors alone. The three
+	     costs follow the visitor group entries they replace, which keeps party sizes about the same. -->
+	<PawnKindDef ParentName="VillagerBase">
+		<defName>LP17_Visitor</defName>
+		<label>visitor</label>
+		<combatPower>45</combatPower>
+	</PawnKindDef>
+	<PawnKindDef ParentName="VillagerBase">
+		<defName>LP17_VisitorGuard</defName>
+		<label>visiting guard</label>
+		<combatPower>70</combatPower>
+		<isFighter>true</isFighter>
+	</PawnKindDef>
+	<PawnKindDef ParentName="VillagerBase">
+		<defName>LP17_VisitorElite</defName>
+		<label>visiting escort</label>
+		<combatPower>120</combatPower>
+		<isFighter>true</isFighter>
+	</PawnKindDef>
+</Defs>
