@@ -71,6 +71,7 @@ namespace LP17Hotfix
             VefExtinguishNoAttachments.Apply();
             HiveLookupNoMap.Apply();
             AnimeVisitorsOnly.Apply();
+            DesignatorsGroupByDef.Apply();
         }
     }
 
@@ -114,7 +115,7 @@ namespace LP17Hotfix
                 items++;
             }
             foreach (ThingDef d in DefDatabase<ThingDef>.AllDefs)
-                if (d.IsWeapon && d.modContentPack != null && Packs.Contains(d.modContentPack.PackageIdPlayerFacing)) d.weaponTags = null;
+                if (d.IsWeapon && d.modContentPack != null && Packs.Contains(d.modContentPack.PackageIdPlayerFacing)) d.weaponTags?.Clear(); // not null: Simple Sidearms caches its weapon list earlier and iterates the tags unchecked
             foreach (PawnKindDef k in DefDatabase<PawnKindDef>.AllDefs)
                 (k.apparelDisallowTags ?? (k.apparelDisallowTags = new List<string>())).Add(tag);
             foreach (RimWorld.FactionDef f in DefDatabase<RimWorld.FactionDef>.AllDefs)
@@ -134,6 +135,30 @@ namespace LP17Hotfix
             Lp.Note = items + " items, " + options + " visitor group entries";
             return null;
         });
+    }
+
+    static class DesignatorsGroupByDef
+    {
+        // Commands with the same label and icon count as one, and the architect menu keeps only the first. Rimefeller's linoleum
+        // floors copy the labels and icons of the wood, stone tile and flagstone floor groups, so finishing its research hid those.
+        internal static void Apply() => Lp.Run("designators-group-by-def", () =>
+        {
+            new Harmony(Lp.Id).Patch(AccessTools.Method(typeof(Command), nameof(Command.GroupsWith)), postfix: new HarmonyMethod(typeof(DesignatorsGroupByDef), nameof(Postfix)));
+            return null;
+        });
+
+        static BuildableDef Placed(Gizmo g)
+        {
+            if (g is RimWorld.Designator_Dropdown d) g = d.Elements.Count > 0 ? d.Elements[0] : null;
+            return (g as RimWorld.Designator_Place)?.PlacingDef;
+        }
+
+        static void Postfix(Command __instance, Gizmo other, ref bool __result)
+        {
+            if (!__result) return;
+            BuildableDef a = Placed(__instance), b = Placed(other);
+            if (a != null && b != null && a != b) __result = false;
+        }
     }
 
     static class VefExtinguishNoAttachments
