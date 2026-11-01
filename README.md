@@ -28,7 +28,13 @@ Known limits: `packs.py` regexes and `OVER` are tuned to one specific list; `rep
 
 ## probe/ - runtime scan of the active list
 
-`probe\Probe.cs` compiles into LP17 Hotfix only with `dotnet build -c Release -p:Probe=true -o bin/ProbeBuild`. `harness\proberun.ps1 -Mode static|soak [-Save NAME] -OutLog FILE [-OutTable FILE]` swaps that DLL in, turns dev mode on, launches, waits for `[PROBE] done`, kills the game, then restores the DLL and Prefs.xml. `static` compiles every mod method (generics included) and checks Harmony targets and comp property classes; `soak` loads a save with autosave off and exercises UI tabs, defs, pawn kinds, spawns, incidents and quests. It never saves. `LP17_PROBE_SKIP` is a comma list of defNames not to spawn. Many soak errors are artefacts of spawning things without their setup, so read stacks before fixing.
+`probe\Probe.cs` compiles into LP17 Hotfix only with `dotnet build -c Release -p:Probe=true -o bin/ProbeBuild`. `harness\proberun.ps1 -Mode static|soak [-Save NAME] -OutLog FILE [-OutTable FILE]` swaps that DLL in, turns dev mode on, launches, waits for `[PROBE] done`, kills the game, then restores the DLL and Prefs.xml. `static` compiles every mod method (generics included) and checks Harmony targets and comp property classes; `soak` loads a save with autosave off and exercises UI tabs, defs, pawn kinds, spawns, incidents and quests. It never saves. `LP17_PROBE_SKIP` is a comma list of defNames not to spawn; always skip `AA_BlackHiveMound`, whose spawn loops forever when the probe gives it a faction. Many soak errors are artefacts of spawning things without their setup, so read stacks before fixing.
+
+`-Mode scan` loads a save and writes `.architect.tsv` and `.architectcats.tsv` (every buildable: category, dropdown, cost, research, whether a designator exists, is allowed and is visible), logs what Better Architect's floors tab gets and shows, logs designators sharing a label and icon, times one save, measures frame times and TPS at each game speed, then times every Harmony patch and game component over `LP17_PROBE_TICKS` ticks (default 3600) into `.perf.tsv`. `LP17_PROBE_MENU_ONLY=1` stops before the timings. Every mode writes `.exceptions.tsv`: all thrown exceptions, including ones a mod catches and never logs.
+
+`-Unhide` turns FPS+ Error Helper's log filters off for one launch, and `-WithoutMods id,id` leaves mods out of one launch for A/B runs. Both are restored afterwards.
+
+`-Mode autoresearch` loads a save and tests YART QoL's auto research: clicks the button (the draw and click code runs, only the mouse input is faked), checks the player's queue goes first, reloads a temporary save, lets pawns finish two projects, then runs research out in memory checking every pick. Log lines are `[PROBE] ok` or `[PROBE] FAIL`, ending with a failure count; it writes `.picks.tsv` and `.remaining.tsv`, and screenshots named `LP17Probe-*` in the game's Screenshots folder. A faked click cannot see a window on top of the button, so the test also asks the window stack and the screenshots are worth reading.
 
 ## ildump/ - .NET metadata IL dumper
 
@@ -71,6 +77,12 @@ Headless installer test: `HBM_ACTION=install HBM_YES=1 HBM_TEST=1 HBM_GAME_DIR=<
 ## hotfix/ - LocalPack Hotfixes mod
 
 Harmony runtime fixes as one mod, `local.lp17.hotfix` (folder `16-compat__local.lp17.hotfix`, last in the active list). Build: `dotnet build -c Release` in `hotfix\` (net8.0 output compiled against the game folder's own System.Private.CoreLib/System.Runtime 10.0, Assembly-CSharp, UnityStubs and the Harmony mod's 0Harmony; works with the .NET 8 SDK), then copy `bin\Release\LP17Hotfix.dll` to `1.7\Assemblies\` of both mod copies (`<RimWorld>\Mods` and the LocalPack). Mod types are reached by name only, so a missing mod or changed signature skips that fix. Each fix logs `[LP17 Hotfix] <id>: applied` or `skipped (<reason>)`: `sound-before-ui`, `pwu-info-notices`, `meleeanim-info-notices`, `scos-notice-videoplayerutil` (from the Mod constructor), `trains-spawn-hook`, `vge-srr-unpatch`, `smyh-known-patch`, `yart-layer-separation`, `translation-dump` (startup pass; dev mode only, writes `Config\TranslationErrors-<language>.tsv` with the game's own translation load errors). Root causes: the pack's FIXES-warnings.md, RW-MOD-014.
+
+## yartqol/ - YART QoL Add-on mod
+
+Additions to the Yet Another Research Tree tab as one mod, `local.yart.qol` (folder `02-ui__local.yart.qol`, right after `seohyeon.yart` in the list). Build: `dotnet build -c Release` in `yartqol\`, then copy `bin\Release\YartQol.dll` to `1.7\Assemblies\`, and `About\` and `Languages\` to the mod folder. It compiles against the deployed YART DLL in `<RimWorld>\Mods`, which is older than the workshop copy, so read that one and not the workshop source when something differs.
+
+Auto research is a toggle saved with the game. While on, each idle YART channel gets the cheapest project that `CanStartNow`, after the player's queue; it turns off when nothing runs and nothing can start. Gravtech is left out: Vanilla Gravship Expanded keeps it in a slot of its own, and YART does not see that slot on this list because its check compares against `vanillaexpanded.gravship` while the mod loads as `vanillaexpanded.gravship_steam`, so gravtech falls into the bench channel.
 
 ## bundlex/ - Unity bundle texture export
 

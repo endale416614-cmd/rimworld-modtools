@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ModMetaData>
+  <name>YART QoL Add-on</name>
+  <author>LocalPack</author>
+  <packageId>local.yart.qol</packageId>
+  <supportedVersions>
+    <li>1.7</li>
+  </supportedVersions>
+  <description>Small additions to the Yet Another Research Tree (YART) research tab.
+
+Auto research: a button on the queue bar, left of the queue cards. While it is on, any idle research slot (the bench and each Anomaly knowledge category) gets the cheapest research that can start now, after your own queue. It turns itself off when nothing is running and nothing that isn't locked is left. Locked research starts as soon as its requirements are met, while the button is still on. Gravtech research is left out, because it advances on gravdata from flights and not at a bench. The setting is saved with the game.</description>
+  <modDependencies>
+    <li>
+      <packageId>brrainz.harmony</packageId>
+      <displayName>Harmony</displayName>
+      <steamWorkshopUrl>https://steamcommunity.com/workshop/filedetails/?id=2009463077</steamWorkshopUrl>
+    </li>
+    <li>
+      <packageId>seohyeon.yart</packageId>
+      <displayName>Yet Another Research Tree (YART)</displayName>
+      <steamWorkshopUrl>https://steamcommunity.com/workshop/filedetails/?id=3745434121</steamWorkshopUrl>
+    </li>
+  </modDependencies>
+  <loadAfter>
+    <li>brrainz.harmony</li>
+    <li>seohyeon.yart</li>
+  </loadAfter>
+</ModMetaData>

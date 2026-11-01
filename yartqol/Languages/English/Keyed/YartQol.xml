@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LanguageData>
+  <YartQol_AutoResearchOn>Auto research\nON</YartQol_AutoResearchOn>
+  <YartQol_AutoResearchOff>Auto research\nOFF</YartQol_AutoResearchOff>
+  <YartQol_AutoResearchTip>While on, any idle research slot gets the cheapest research that can start now, after your own queue.\n\nTurns itself off when nothing is running and nothing that isn't locked is left.\n\nGravtech research is left out, because it needs gravdata from flights.</YartQol_AutoResearchTip>
+  <YartQol_AutoResearchDone>Auto research stopped: no available research left.</YartQol_AutoResearchDone>
+</LanguageData>

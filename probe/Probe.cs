@@ -4,6 +4,11 @@
 //   gear   : load LP17_PROBE_SAVE, generate every faction's pawn kinds and visitor group, write what they wear and carry to LP17_PROBE_OUT.gear.tsv.
 //   soak   : load LP17_PROBE_SAVE, autosave off, open UI tabs, build every def, generate pawn kinds, spawn things,
 //            fire incidents and quests, then run ticks. The game is killed afterwards and never saved.
+//   scan   : load LP17_PROBE_SAVE, write every buildable and why the architect menu shows it or not to LP17_PROBE_OUT.architect.tsv,
+//            then time every Harmony patch and game component over LP17_PROBE_TICKS ticks to LP17_PROBE_OUT.perf.tsv.
+//   autoresearch : load LP17_PROBE_SAVE, click YART QoL's auto research button and run research out in memory, checking each pick.
+//            Writes LP17_PROBE_OUT.picks.tsv and .remaining.tsv. Its only save is a temporary one for the reload check, deleted right after.
+// Every mode also writes exceptions that were thrown, caught or not, to LP17_PROBE_OUT.exceptions.tsv.
 // Every line starts with [PROBE so harness/proberun.ps1 can attribute errors to the step before them.
 using System;
 using System.Collections.Generic;
@@ -28,8 +33,9 @@ namespace LP17Hotfix
         static Probe()
         {
             if (string.IsNullOrEmpty(mode)) return;
+            AppDomain.CurrentDomain.FirstChanceException += (s, e) => CountException(e.Exception);
             if (mode == "static" || mode == "dump") new Harmony("local.lp17.probe").Patch(AccessTools.Method(typeof(Root_Entry), "Update"), postfix: new HarmonyMethod(typeof(Probe), nameof(MenuFrame)));
-            else if (mode == "soak" || mode == "gear")
+            else if (mode == "soak" || mode == "gear" || mode == "scan" || mode == "autoresearch")
             {
                 Harmony h = new Harmony("local.lp17.probe");
                 h.Patch(AccessTools.Method(typeof(Autosaver), "AutosaverTick"), prefix: new HarmonyMethod(typeof(Probe), nameof(No)));
@@ -40,6 +46,42 @@ namespace LP17Hotfix
         }
 
         static bool No() => false;
+
+        // ---- exceptions, shown in the log or not ----
+
+        sealed class Thrown { public string phase, type, where, message, stack; public int count; }
+
+        static readonly Dictionary<string, Thrown> thrown = new Dictionary<string, Thrown>();
+
+        [ThreadStatic] static bool inCount;
+
+        static void CountException(Exception e)
+        {
+            if (inCount) return;
+            inCount = true;
+            try
+            {
+                string phase = Current.ProgramState == ProgramState.Playing ? "play" : "load";
+                string where = (e.StackTrace ?? "").Split('\n')[0].Trim();
+                string key = phase + "|" + e.GetType().FullName + "|" + where;
+                lock (thrown)
+                {
+                    if (!thrown.TryGetValue(key, out Thrown t))
+                        thrown[key] = t = new Thrown { phase = phase, type = e.GetType().Name, where = where, message = First(e.Message), stack = string.Join(" <- ", Environment.StackTrace.Split('\n').Skip(3).Take(14).Select(x => x.Trim().Replace("at ", ""))) };
+                    t.count++;
+                }
+            }
+            catch { }
+            finally { inCount = false; }
+        }
+
+        static void Finish()
+        {
+            if (!string.IsNullOrEmpty(outPath))
+                lock (thrown)
+                    Table("exceptions", new[] { "phase", "count", "type", "where", "message", "stack" }, thrown.Values.OrderByDescending(t => t.count).Select(t => new object[] { t.phase, t.count, t.type, t.where, t.message, t.stack }));
+            Log.Message("[PROBE] done");
+        }
 
         static int menuFrames;
 
@@ -99,7 +141,7 @@ namespace LP17Hotfix
                     }));
             }
             catch (Exception e) { Log.Error("[PROBE] dump failed: " + e); }
-            Log.Message("[PROBE] done");
+            Finish();
         }
 
         // ---- static scan ----
@@ -119,7 +161,7 @@ namespace LP17Hotfix
             try { HarmonyTargets(); } catch (Exception e) { Log.Error("[PROBE] harmony failed: " + e); }
             try { PatchTable(); } catch (Exception e) { Log.Error("[PROBE] table failed: " + e); }
             try { CompProps(); } catch (Exception e) { Log.Error("[PROBE] comps failed: " + e); }
-            Log.Message("[PROBE] done");
+            Finish();
         }
 
         static void JitAll()
@@ -297,13 +339,13 @@ namespace LP17Hotfix
             Log.ResetMessageCount();
             foreach (Window w in Find.WindowStack.Windows.ToList())
                 if (w.forcePause || w is Dialog_MessageBox) w.Close(false);
-            if (run == null) { Log.Message("[PROBE] playing"); run = (mode == "gear" ? Gear() : Soak()).GetEnumerator(); }
+            if (run == null) { Log.Message("[PROBE] playing"); run = (mode == "gear" ? Gear() : mode == "scan" ? Scan() : mode == "autoresearch" ? AutoResearchTest() : Soak()).GetEnumerator(); }
             Stopwatch sw = Stopwatch.StartNew();
             try
             {
                 while (sw.ElapsedMilliseconds < 80)
                 {
-                    if (!run.MoveNext()) { Log.Message("[PROBE] done"); run = Idle().GetEnumerator(); return; }
+                    if (!run.MoveNext()) { Finish(); run = Idle().GetEnumerator(); return; }
                     if (run.Current > 0) return; // yield 1: end the frame so the UI draws
                 }
             }
@@ -327,6 +369,417 @@ namespace LP17Hotfix
                 Guard("tick", () => Find.TickManager.DoSingleTick());
                 yield return 0;
             }
+        }
+
+        // ---- architect menu and timings ----
+
+        static object Extension(Def d, string typeName, string field)
+        {
+            DefModExtension x = d.modExtensions?.FirstOrDefault(e => e.GetType().Name == typeName);
+            return x == null ? null : AccessTools.Field(x.GetType(), field)?.GetValue(x);
+        }
+
+        static IEnumerable<Designator> Flat(IEnumerable<Designator> list)
+        {
+            foreach (Designator d in list)
+            {
+                yield return d;
+                if (d is Designator_Dropdown dd) foreach (Designator e in dd.Elements) yield return e;
+            }
+        }
+
+        static void ArchitectScan(Map map)
+        {
+            var resolved = new Dictionary<BuildableDef, string>();
+            var allowed = new HashSet<BuildableDef>();
+            var visible = new HashSet<BuildableDef>();
+            foreach (DesignationCategoryDef c in DefDatabase<DesignationCategoryDef>.AllDefs)
+            {
+                foreach (Designator d in Flat(c.AllResolvedDesignators))
+                    if (d is Designator_Place p && p.PlacingDef != null)
+                    {
+                        resolved[p.PlacingDef] = c.defName;
+                        if (d.Visible) visible.Add(p.PlacingDef);
+                    }
+                foreach (Designator d in Flat(c.ResolvedAllowedDesignators))
+                    if (d is Designator_Place p && p.PlacingDef != null) allowed.Add(p.PlacingDef);
+            }
+            Type hiddenType = AccessTools.TypeByName("BetterArchitect.VefHiddenDesignatorCache");
+            hiddenType?.GetMethod("Initialize")?.Invoke(null, null);
+            MethodInfo isHidden = hiddenType == null ? null : AccessTools.Method(hiddenType, "IsHidden", new[] { typeof(BuildableDef) });
+            Table("architectcats", new[] { "defName", "label", "mod", "parent", "order", "resolved", "allowed", "visible" },
+                DefDatabase<DesignationCategoryDef>.AllDefs.Select(c => new object[] { c.defName, c.label, c.modContentPack?.PackageIdPlayerFacing, (Extension(c, "NestedCategoryExtension", "parentCategory") as Def)?.defName, c.order, c.AllResolvedDesignators.Count, c.ResolvedAllowedDesignators.Count(), c.ResolvedAllowedDesignators.Count(d => d.Visible) }));
+            string Materials(BuildableDef b) => Join(b.costList?.Select(x => x.thingDef?.defName + (x.thingDef != null && map.listerThings.ThingsOfDef(x.thingDef).Any() ? "" : "!")));
+            Table("architect", new[] { "defName", "label", "mod", "kind", "category", "dropdown", "cost", "stuffCount", "stuffCats", "research", "researchDone", "minTech", "maxTech", "prereqs", "resolved", "allowed", "visible", "vefHidden" },
+                DefDatabase<TerrainDef>.AllDefs.Cast<BuildableDef>().Concat(DefDatabase<ThingDef>.AllDefs.Where(t => t.category == ThingCategory.Building)).Where(b => b.designationCategory != null || !b.costList.NullOrEmpty() || b.costStuffCount > 0).Select(b => new object[]
+                {
+                    b.defName, b.label, b.modContentPack?.PackageIdPlayerFacing, b is TerrainDef ? "terrain" : "thing", b.designationCategory?.defName, b.designatorDropdown?.defName,
+                    Materials(b), b.costStuffCount, Join(b.stuffCategories?.Select(s => s.defName)), Join(b.researchPrerequisites?.Select(r => r.defName)), b.IsResearchFinished, b.minTechLevelToBuild, b.maxTechLevelToBuild,
+                    Join(b.buildingPrerequisites?.Select(p => p.defName)), resolved.TryGetValue(b, out string cat) ? cat : "", allowed.Contains(b), visible.Contains(b), isHidden != null && (bool)isHidden.Invoke(null, new object[] { b })
+                }));
+        }
+
+        sealed class Timer { public string owner, patch, target; public long calls, stamps; }
+
+        static readonly Dictionary<MethodBase, Timer> timers = new Dictionary<MethodBase, Timer>();
+
+        static void TimeIn(out long __state) => __state = Stopwatch.GetTimestamp();
+
+        static void TimeOut(long __state, MethodBase __originalMethod)
+        {
+            if (!timers.TryGetValue(__originalMethod, out Timer t)) return;
+            System.Threading.Interlocked.Increment(ref t.calls);
+            System.Threading.Interlocked.Add(ref t.stamps, Stopwatch.GetTimestamp() - __state);
+        }
+
+        static void Time(Harmony h, MethodInfo m, string owner, string target)
+        {
+            if (m == null || m.IsAbstract || m.IsGenericMethodDefinition || m.ContainsGenericParameters || timers.ContainsKey(m)) return;
+            timers[m] = new Timer { owner = owner, patch = m.DeclaringType?.FullName + "." + m.Name, target = target };
+            Guard("time " + m.Name, () => h.Patch(m, prefix: new HarmonyMethod(typeof(Probe), nameof(TimeIn)), finalizer: null, postfix: new HarmonyMethod(typeof(Probe), nameof(TimeOut))));
+        }
+
+        static void TimeAll(Map map)
+        {
+            Harmony h = new Harmony("local.lp17.probe.timer");
+            string Name(MethodBase b) => b.DeclaringType?.Name + "." + b.Name;
+            foreach (MethodBase target in Harmony.GetAllPatchedMethods().ToList())
+            {
+                HarmonyLib.Patches info = Harmony.GetPatchInfo(target);
+                if (info == null) continue;
+                foreach (Patch p in info.Prefixes.Concat(info.Postfixes).Concat(info.Finalizers))
+                    if (!p.owner.StartsWith("local.lp17.probe")) Time(h, p.PatchMethod, p.owner, Name(target));
+            }
+            string[] names = { "GameComponentTick", "GameComponentUpdate", "GameComponentOnGUI", "MapComponentTick", "MapComponentUpdate", "MapComponentOnGUI", "WorldComponentTick", "WorldComponentUpdate" };
+            IEnumerable<object> comps = Current.Game.components.Cast<object>().Concat(map.components).Concat(Find.World.components);
+            foreach (object c in comps)
+                foreach (string n in names)
+                    Time(h, c.GetType().GetMethod(n, BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly), c.GetType().Assembly.GetName().Name, c.GetType().Name + "." + n);
+            foreach ((Type t, string n) in new[] { (typeof(TickManager), "DoSingleTick"), (typeof(Map), "MapPreTick"), (typeof(Map), "MapPostTick"), (typeof(Map), "MapUpdate"), (typeof(TickList), "Tick"), (typeof(RimWorld.Planet.World), "WorldTick"), (typeof(Pawn), "Tick"), (typeof(Root_Play), "Update"), (typeof(Root), "OnGUI"), (typeof(RimWorld.UIRoot_Play), "UIRootOnGUI") })
+                Time(h, AccessTools.Method(t, n), "(top)", t.Name + "." + n);
+            Log.Message("[PROBE] timing " + timers.Count + " methods");
+        }
+
+        static string DesName(Designator d) => d is Designator_Dropdown dd ? "DD[" + Join(dd.Elements.Select(DesName)) + "]" : d is Designator_Place p ? p.PlacingDef?.defName : d.GetType().Name;
+
+        static int floorLogs;
+
+        static void FloorsPost(List<Designator> allFloorDesignators, List<Designator> __result)
+        {
+            if (floorLogs++ > 1) return;
+            Log.Message("[PROBE] floors tab got " + allFloorDesignators.Count + ": " + Join(allFloorDesignators.Select(DesName)));
+            Log.Message("[PROBE] floors tab shows " + __result.Count + ": " + Join(__result.Select(DesName)));
+            if (floorLogs > 1) return;
+            Guard("floors trace", () =>
+            {
+                object cached = AccessTools.Field(AccessTools.TypeByName("BetterArchitect.ArchitectCategoryTab_DesignationTabOnGUI_Patch"), "cachedRawDesignatorData").GetValue(null);
+                List<Designator> unique = new List<Designator>();
+                foreach (object data in (System.Collections.IEnumerable)cached)
+                {
+                    DesignationCategoryDef def = (DesignationCategoryDef)AccessTools.Field(data.GetType(), "def").GetValue(data);
+                    List<Designator> all = (List<Designator>)AccessTools.Field(data.GetType(), "allDesignators").GetValue(data);
+                    Log.Message("[PROBE] floor category " + def.defName + " has " + all.Count);
+                    foreach (Designator d in all)
+                    {
+                        Designator u = unique.FirstOrDefault(x => x.GroupsWith(d));
+                        if (u != null) Log.Message($"[PROBE] merged {DesName(d)} '{d.Label}' icon {d.icon?.name} into {DesName(u)} '{u.Label}' icon {u.icon?.name} hot {u.hotKey?.defName} key {u.groupKey}/{u.groupKeyIgnoreContent}");
+                        else unique.Add(d);
+                    }
+                }
+                Log.Message("[PROBE] unique " + unique.Count + ": " + Join(unique.OfType<Designator_Dropdown>().Select(d => "'" + d.Label + "' " + d.Elements.Count)));
+            });
+        }
+
+        static void OpenFloors()
+        {
+            Type t = AccessTools.TypeByName("BetterArchitect.ArchitectCategoryTab_DesignationTabOnGUI_Patch");
+            new Harmony("local.lp17.probe").Patch(AccessTools.Method(t, "DrawMaterialListForFloors"), postfix: new HarmonyMethod(typeof(Probe), nameof(FloorsPost)));
+            MainButtonDef arch = DefDatabase<MainButtonDef>.GetNamed("Architect");
+            Find.MainTabsRoot.SetCurrentTab(arch, false);
+            MainTabWindow_Architect win = (MainTabWindow_Architect)arch.TabWindow;
+            win.selectedDesPanel = ((List<ArchitectCategoryTab>)AccessTools.Field(typeof(MainTabWindow_Architect), "desPanelsCached").GetValue(win)).First(p => p.def == DesignationCategoryDefOf.Floors);
+        }
+
+        // Better Architect shows a tab and its nested categories together, keeping one designator per label and icon.
+        static void ArchitectCollisions()
+        {
+            int found = 0;
+            foreach (IGrouping<DesignationCategoryDef, DesignationCategoryDef> tab in DefDatabase<DesignationCategoryDef>.AllDefs.GroupBy(c => (Extension(c, "NestedCategoryExtension", "parentCategory") as DesignationCategoryDef) ?? c))
+            {
+                List<Designator> all = tab.SelectMany(c => c.ResolvedAllowedDesignators).Where(d => d.Visible && !(d is Designator_Dropdown dd && dd.Elements.Count == 0)).ToList();
+                foreach (IGrouping<string, Designator> same in all.Where(d => d is Designator_Place || d is Designator_Dropdown).GroupBy(d => d.Label + "|" + d.icon?.name))
+                {
+                    List<string> names = same.Select(DesName).Distinct().ToList();
+                    if (names.Count < 2) continue;
+                    found++;
+                    Log.Message($"[PROBE] same label and icon in tab {tab.Key.defName}: '{same.Key}': {Join(names)}");
+                }
+            }
+            Log.Message("[PROBE] label and icon collisions: " + found);
+        }
+
+        static IEnumerable<int> Natural(string label, TimeSpeed speed, double seconds)
+        {
+            Find.TickManager.CurTimeSpeed = speed;
+            List<double> frames = new List<double>();
+            int startTick = Find.TickManager.TicksGame, gen0 = GC.CollectionCount(0), gen1 = GC.CollectionCount(1), gen2 = GC.CollectionCount(2);
+            TimeSpan pause = GC.GetTotalPauseDuration();
+            long alloc = GC.GetTotalAllocatedBytes(false);
+            Stopwatch total = Stopwatch.StartNew(), frame = Stopwatch.StartNew();
+            while (total.Elapsed.TotalSeconds < seconds)
+            {
+                yield return 1;
+                frames.Add(frame.Elapsed.TotalMilliseconds);
+                frame.Restart();
+            }
+            frames.Sort();
+            double At(double f) => frames[Math.Min(frames.Count - 1, (int)(frames.Count * f))];
+            double s = total.Elapsed.TotalSeconds;
+            Log.Message($"[PROBE] natural {label}: {s:F1} s, tps {(Find.TickManager.TicksGame - startTick) / s:F1}, fps {frames.Count / s:F1}, frame ms p50 {At(0.5):F1} p95 {At(0.95):F1} p99 {At(0.99):F1} max {frames[frames.Count - 1]:F1}, gc {GC.CollectionCount(0) - gen0}/{GC.CollectionCount(1) - gen1}/{GC.CollectionCount(2) - gen2}, pause {(GC.GetTotalPauseDuration() - pause).TotalMilliseconds:F0} ms, alloc {(GC.GetTotalAllocatedBytes(false) - alloc) / (1024 * 1024) / s:F0} MB/s, heap {GC.GetTotalMemory(false) / (1024 * 1024)} MB, gc committed {GC.GetGCMemoryInfo().TotalCommittedBytes / (1024 * 1024)} MB, latency {System.Runtime.GCSettings.LatencyMode}, server {System.Runtime.GCSettings.IsServerGC}");
+        }
+
+        static IEnumerable<int> Scan()
+        {
+            Map map = Find.CurrentMap ?? Find.AnyPlayerHomeMap;
+            Mark("architect");
+            Guard("architect", () => ArchitectScan(map));
+            yield return 1;
+            Mark("floors tab");
+            Guard("floors tab", OpenFloors);
+            for (int i = 0; i < 5; i++) yield return 1;
+            Find.MainTabsRoot.EscapeCurrentTab(false);
+            Guard("collisions", ArchitectCollisions);
+            yield return 1;
+            Guard("save timing", () =>
+            {
+                Stopwatch save = Stopwatch.StartNew();
+                GameDataSaveLoader.SaveGame("LP17ProbeTemp");
+                string path = GenFilePaths.FilePathForSavedGame("LP17ProbeTemp");
+                Log.Message($"[PROBE] save took {save.ElapsedMilliseconds} ms, {new FileInfo(path).Length / (1024 * 1024)} MB");
+                File.Delete(path);
+            });
+            yield return 1;
+            if (Environment.GetEnvironmentVariable("LP17_PROBE_MENU_ONLY") == "1") yield break;
+            Mark("settle");
+            foreach (int x in Ticks(600)) yield return x;
+            Mark("natural");
+            foreach (int x in Natural("warm", TimeSpeed.Superfast, 45)) yield return x;
+            foreach (int x in Natural("paused", TimeSpeed.Paused, 15)) yield return x;
+            foreach (int x in Natural("normal", TimeSpeed.Normal, 30)) yield return x;
+            foreach (int x in Natural("fast", TimeSpeed.Fast, 30)) yield return x;
+            foreach (int x in Natural("superfast", TimeSpeed.Superfast, 30)) yield return x;
+            Find.TickManager.CurTimeSpeed = TimeSpeed.Paused;
+            Mark("wrap");
+            Guard("wrap", () => TimeAll(map));
+            yield return 1;
+            int count = int.TryParse(Environment.GetEnvironmentVariable("LP17_PROBE_TICKS"), out int parsed) ? parsed : 3600;
+            Mark("timing " + count);
+            foreach (Timer t in timers.Values) { t.calls = 0; t.stamps = 0; }
+            long gc = GC.CollectionCount(0), frames = UnityEngine.Time.frameCount;
+            Stopwatch all = Stopwatch.StartNew();
+            foreach (int x in Ticks(count)) yield return x;
+            all.Stop();
+            Log.Message($"[PROBE] timed {count} ticks in {all.ElapsedMilliseconds} ms, frames {UnityEngine.Time.frameCount - frames}, gen0 {GC.CollectionCount(0) - gc}, gen2 {GC.CollectionCount(2)}, heap {GC.GetTotalMemory(false) / (1024 * 1024)} MB, pawns {map.mapPawns.AllPawnsSpawnedCount}, things {map.listerThings.AllThings.Count}");
+            double perMs = Stopwatch.Frequency / 1000.0;
+            Table("perf", new[] { "ms", "calls", "usPerCall", "owner", "patch", "target" },
+                timers.Values.Where(t => t.calls > 0).OrderByDescending(t => t.stamps).Select(t => new object[] { (t.stamps / perMs).ToString("F1"), t.calls, (t.stamps / perMs * 1000 / t.calls).ToString("F2"), t.owner, t.patch, t.target }));
+        }
+
+        // ---- YART auto research ----
+
+        static int autoDraws, autoClicks, autoFails, naturalFinishes;
+        static UnityEngine.Vector2 autoCenter;
+        static bool clickAuto;
+
+        static void DumpLetters(string when)
+        {
+            foreach (Letter l in Find.LetterStack.LettersListForReading)
+                Log.Message($"[PROBE] letter {when}: {l.GetUniqueLoadID()}, {l.GetType().Name}, {l.Label}, arrived {l.arrivalTick}, archived {Find.Archive.Contains(l)}");
+            Log.Message($"[PROBE] archive {when}: {Find.Archive.ArchivablesListForReading.Count} entries");
+        }
+
+        // Stands in for the mouse: the button's own draw and click code runs, only the input is faked.
+        static void ButtonPost(UnityEngine.Rect butRect, ref bool __result)
+        {
+            if (butRect.width != 110f || butRect.height != YART.Data.Constraints.QueueBarHeight - 24f) return;
+            autoDraws++;
+            autoCenter = UI.GUIToScreenPoint(butRect.center);
+            if (!clickAuto) return;
+            clickAuto = false;
+            autoClicks++;
+            __result = true;
+        }
+
+        static void FinishPost(ResearchProjectDef proj, Pawn researcher)
+        {
+            if (researcher != null) naturalFinishes++;
+            Log.Message($"[PROBE] finished {proj.defName}, researcher {researcher?.LabelShort}, main thread {UnityData.IsInMainThread}, bench now {Find.ResearchManager.GetProject()?.defName}");
+        }
+
+        static void MessagePre(Message msg) => Log.Message("[PROBE] message: " + msg.text);
+
+        static void Expect(bool ok, string what)
+        {
+            if (!ok) autoFails++;
+            Log.Message($"[PROBE] {(ok ? "ok" : "FAIL")} {what}");
+        }
+
+        static bool IsGravtech(ResearchProjectDef def) => YART.Compat.GravshipCompat.IsGravshipResearchMethod != null && (bool)YART.Compat.GravshipCompat.IsGravshipResearchMethod.Invoke(null, new object[] { def });
+
+        static List<ResearchProjectDef> Startable(YART.Data.ResearchChannel channel) =>
+            YART.Data.ResearchGraph.Instance.AllNodes.Values.Where(n => n.Channel == channel && n.Def.CanStartNow && !IsGravtech(n.Def)).Select(n => n.Def).ToList();
+
+        static void Shot(string label) => Guard("shot", () =>
+        {
+            Find.WindowStack.TryRemove(typeof(LudeonTK.EditWindow_Log), false);
+            ScreenshotTaker.TakeNonSteamShot("LP17Probe-" + label);
+            Log.Message("[PROBE-SHOT] " + label + " in " + GenFilePaths.ScreenshotFolderPath);
+        });
+
+        static int offStateScans;
+
+        static void CheapestPre() { if (Current.ProgramState != ProgramState.Playing) offStateScans++; }
+
+        static IEnumerable<int> ClickAuto()
+        {
+            int clicks = autoClicks;
+            clickAuto = true;
+            for (int i = 0; i < 600 && autoClicks == clicks; i++) yield return 1;
+            clickAuto = false;
+            Expect(autoClicks > clicks, "button took the click");
+        }
+
+        static IEnumerable<int> AutoResearchTest()
+        {
+            Find.TickManager.CurTimeSpeed = TimeSpeed.Paused;
+            Harmony h = new Harmony("local.lp17.probe");
+            h.Patch(AccessTools.Method(typeof(Widgets), nameof(Widgets.ButtonInvisible)), postfix: new HarmonyMethod(typeof(Probe), nameof(ButtonPost)));
+            h.Patch(AccessTools.Method(typeof(ResearchManager), nameof(ResearchManager.FinishProject)), postfix: new HarmonyMethod(typeof(Probe), nameof(FinishPost)) { priority = Priority.Last });
+            h.Patch(AccessTools.Method(typeof(Messages), nameof(Messages.Message), new[] { typeof(Message), typeof(bool) }), prefix: new HarmonyMethod(typeof(Probe), nameof(MessagePre)));
+            h.Patch(AccessTools.Method(typeof(YartQol.AutoResearch), "Cheapest"), prefix: new HarmonyMethod(typeof(Probe), nameof(CheapestPre)));
+            YartQol.AutoResearch auto = Current.Game.GetComponent<YartQol.AutoResearch>();
+            ResearchManager rm = Find.ResearchManager;
+            YART.Data.ResearchQueueManager queue = YART.Data.ResearchQueueManager.Instance;
+            MethodInfo missingMemes = AccessTools.Method(typeof(YART.Data.ResearchQueueManager), "ComputeUnlockedDefsThatHaveMissingMemes");
+            bool NoDialog(ResearchProjectDef d) => ((System.Collections.ICollection)missingMemes.Invoke(null, new object[] { d })).Count == 0;
+
+            Expect(auto != null, "component added to a save made without the mod");
+            Expect(!auto.On, "off by default");
+
+            Mark("open tab");
+            Find.MainTabsRoot.SetCurrentTab(MainButtonDefOf.Research);
+            while (!YART.GraphBuildPipeline.GraphReady) yield return 1;
+            for (int i = 0; i < 60; i++) yield return 1;
+            Expect(autoDraws > 0, $"button drawn {autoDraws} times, tab {MainButtonDefOf.Research.TabWindow.GetType().Name}");
+            Find.WindowStack.TryRemove(typeof(LudeonTK.EditWindow_Log), false);
+            Log.Message("[PROBE] windows: " + string.Join(", ", Find.WindowStack.Windows.Select(w => w.GetType().FullName + " " + w.windowRect)));
+            Expect(Find.WindowStack.GetWindowAt(autoCenter) is YART.MainTabWindow_YART, $"nothing covers the button at {autoCenter}: top window there is {Find.WindowStack.GetWindowAt(autoCenter)?.GetType().Name}");
+            DumpLetters("before the test");
+            Shot("off");
+            yield return 1;
+
+            Mark("player queue first");
+            Log.Message($"[PROBE] save had bench project {rm.GetProject()?.defName}, channels {string.Join(",", YART.Data.ChannelRegistry.All.Select(c => c.Id))}, nodes {YART.Data.ResearchGraph.Instance.AllNodes.Count}, gravtech nodes {YART.Data.ResearchGraph.Instance.AllNodes.Keys.Count(IsGravtech)}");
+            foreach (YART.Data.ResearchChannel c in YART.Data.ChannelRegistry.All)
+            {
+                queue.ClearQueue(c);
+                if (c.CurrentProject != null) rm.StopProject(c.CurrentProject);
+                Log.Message($"[PROBE] channel {c.Id}: {Startable(c).Count} can start now");
+            }
+            List<ResearchProjectDef> bench = Startable(YART.Data.ChannelRegistry.Bench).Where(NoDialog).OrderBy(d => d.CostApparent).ToList();
+            ResearchProjectDef first = bench[bench.Count - 1], second = bench[bench.Count - 2];
+            queue.EnqueueWithChain(first);
+            queue.EnqueueWithChain(second);
+            Expect(rm.GetProject() == first, "queued project starts: " + first.defName);
+            foreach (int x in ClickAuto()) yield return x;
+            Expect(auto.On, "click turns it on");
+            Expect(rm.GetProject() == first, "it leaves the running queued project alone");
+            yield return 1;
+            Shot("on, queue of two");
+            yield return 1;
+            rm.FinishProject(first, doCompletionDialog: true);
+            Expect(rm.GetProject() == second, "next queued project wins over the cheapest: " + rm.GetProject()?.defName);
+            rm.FinishProject(second, doCompletionDialog: true);
+            float cheapest = Startable(YART.Data.ChannelRegistry.Bench).Min(d => d.CostApparent);
+            Expect(rm.GetProject() != null && rm.GetProject().CostApparent <= cheapest + 0.01f, $"queue empty, cheapest picked at once: {rm.GetProject()?.defName} at {rm.GetProject()?.CostApparent} (cheapest {cheapest})");
+            Expect(queue.GetQueue(YART.Data.ChannelRegistry.Bench).Contains(rm.GetProject()), "pick shows in YART's queue bar");
+            yield return 1;
+
+            Mark("pick cost");
+            Stopwatch pick = Stopwatch.StartNew();
+            for (int i = 0; i < 200; i++) auto.Pick();
+            Log.Message($"[PROBE] Pick with the bench busy: {pick.Elapsed.TotalMilliseconds / 200:F3} ms each");
+            yield return 1;
+
+            Mark("save and reload");
+            Find.MainTabsRoot.EscapeCurrentTab(false);
+            Game old = Current.Game;
+            ResearchProjectDef running = rm.GetProject();
+            DumpLetters("before the save");
+            GameDataSaveLoader.SaveGame("LP17ProbeTemp");
+            GameDataSaveLoader.LoadGame("LP17ProbeTemp");
+            while (Current.Game == old || Current.ProgramState != ProgramState.Playing) yield return 1;
+            for (int i = 0; i < 60; i++) yield return 1;
+            File.Delete(GenFilePaths.FilePathForSavedGame("LP17ProbeTemp"));
+            auto = Current.Game.GetComponent<YartQol.AutoResearch>();
+            rm = Find.ResearchManager;
+            queue = YART.Data.ResearchQueueManager.Instance;
+            Expect(auto.On, "still on after a reload");
+            Expect(rm.GetProject() == running, "same project after a reload");
+            Expect(offStateScans == 0, $"no scan while loading ({offStateScans})");
+
+            Mark("natural");
+            Find.TickManager.CurTimeSpeed = TimeSpeed.Superfast;
+            Stopwatch natural = Stopwatch.StartNew();
+            while (natural.Elapsed.TotalSeconds < 150 && naturalFinishes < 2)
+            {
+                ResearchProjectDef cur = rm.GetProject();
+                if (cur != null && cur.ProgressPercent < 0.99f) rm.AddProgress(cur, cur.baseCost * 0.995f - cur.ProgressReal);
+                yield return 1;
+            }
+            Find.TickManager.CurTimeSpeed = TimeSpeed.Paused;
+            Log.Message($"[PROBE] natural: {naturalFinishes} finished by a pawn in {natural.Elapsed.TotalSeconds:F0} s, bench now {rm.GetProject()?.defName}");
+
+            Mark("run out");
+            List<object[]> picks = new List<object[]>();
+            for (int round = 0; auto.On && round < 2000; round++)
+            {
+                bool any = false;
+                foreach (YART.Data.ResearchChannel c in YART.Data.ChannelRegistry.All)
+                {
+                    ResearchProjectDef cur = c.CurrentProject;
+                    if (cur == null) continue;
+                    any = true;
+                    picks.Add(new object[] { round, c.Id, cur.defName, cur.CostApparent, cur.tab?.defName });
+                    rm.FinishProject(cur, doCompletionDialog: true);
+                    ResearchProjectDef next = c.CurrentProject;
+                    List<ResearchProjectDef> open = Startable(c);
+                    if (next == null && open.Count > 0) Expect(false, $"{c.Id} idle after {cur.defName} with {open.Count} startable, first {open[0].defName}");
+                    if (next != null && open.Count > 0 && next.CostApparent > open.Min(d => d.CostApparent) + 0.01f) Expect(false, $"{next.defName} is not the cheapest on {c.Id}");
+                }
+                if (!any) { Expect(false, "still on with nothing running"); break; }
+                yield return 0;
+            }
+            Expect(!auto.On, $"turned itself off after {picks.Count} projects");
+            foreach (YART.Data.ResearchChannel c in YART.Data.ChannelRegistry.All)
+                Expect(Startable(c).Count == 0 && c.CurrentProject == null, $"nothing left to start on {c.Id}");
+            Table("picks", new[] { "round", "channel", "project", "cost", "tab" }, picks);
+            List<string> reasons = new List<string>();
+            Table("remaining", new[] { "project", "channel", "gravtech", "canStartNow", "reasons" }, YART.Data.ResearchGraph.Instance.AllNodes.Values.Where(n => !n.Def.IsFinished).Select(n =>
+            {
+                n.GetLockedReasons(reasons);
+                return new object[] { n.Def.defName, n.Channel.Id, IsGravtech(n.Def), n.Def.CanStartNow, string.Join("; ", reasons) };
+            }));
+
+            Mark("click with nothing left");
+            Find.MainTabsRoot.SetCurrentTab(MainButtonDefOf.Research);
+            for (int i = 0; i < 60; i++) yield return 1;
+            foreach (int x in ClickAuto()) yield return x;
+            Expect(!auto.On, "stays off when nothing is available");
+            yield return 1;
+            Shot("off, nothing left");
+            for (int i = 0; i < 30; i++) yield return 1;
+            Log.Message($"[PROBE] auto research failures: {autoFails}");
         }
 
         static IEnumerable<int> Gear()
@@ -374,6 +827,8 @@ namespace LP17Hotfix
                 }
             }
         }
+
+        static readonly Dictionary<string, int> noIcon = new Dictionary<string, int>();
 
         static IEnumerable<int> Soak()
         {
@@ -460,11 +915,18 @@ namespace LP17Hotfix
                     Find.Selector.Select(t, false, false);
                     _ = t.LabelCap;
                     _ = t.GetInspectString();
-                    _ = t.GetGizmos().ToList();
+                    foreach (Gizmo g in t.GetGizmos())
+                        if (g is Command c && c.icon == null && !(g is Designator))
+                        {
+                            string key = c.GetType().FullName + " '" + c.defaultLabel + "'";
+                            noIcon.TryGetValue(key, out int n);
+                            noIcon[key] = n + 1;
+                        }
                     _ = t.GetInspectTabs()?.ToList();
                 });
                 yield return 0;
             }
+            Log.Message("[PROBE] commands with no icon: " + string.Join("; ", noIcon.OrderByDescending(p => p.Value).Select(p => p.Key + " x" + p.Value)));
             Mark("spawn ticks");
             foreach (int x in Ticks(600)) yield return x;
             Mark("spawn cleanup");

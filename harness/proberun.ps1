@@ -1,12 +1,16 @@
 # Runs the test-only probe build of LP17 Hotfix (probe\Probe.cs): swaps the DLL in, turns dev mode on, launches,
 # waits for "[PROBE] done", kills the game, then restores the DLL and Prefs.xml. Saves nothing to the save folder.
 param(
-    [Parameter(Mandatory)][ValidateSet('static', 'soak', 'dump', 'gear')][string]$Mode,
+    [Parameter(Mandatory)][ValidateSet('static', 'soak', 'dump', 'gear', 'scan', 'autoresearch')][string]$Mode,
     [string]$Save = '',
     [Parameter(Mandatory)][string]$OutLog,
     [string]$OutTable = '',
     [int]$TimeoutSec = 1500,
-    [int]$SettleSec = 10
+    [int]$SettleSec = 10,
+    # Mod ids to leave out of this one launch, exactly as ModsConfig.xml writes them.
+    [string[]]$WithoutMods = @(),
+    # Turns FPS+ Error Helper's log filters off for this one launch, so what it hides reaches the log.
+    [switch]$Unhide
 )
 $gameDir = 'F:\Steam\steamapps\common\RimWorld'
 $userDir = Join-Path $env:USERPROFILE 'AppData\LocalLow\Ludeon Studios\RimWorld by Ludeon Studios'
@@ -22,9 +26,19 @@ $modsConfig = Join-Path $userDir 'Config\ModsConfig.xml'
 $modsConfigText = [IO.File]::ReadAllBytes($modsConfig)
 $prefsText = [IO.File]::ReadAllBytes($prefs)
 $liveDll = [IO.File]::ReadAllBytes($live)
+$fixes = Join-Path $userDir 'Config\Mod_3756967401_FixesMod.xml'
+$fixesText = if (Test-Path $fixes) { [IO.File]::ReadAllBytes($fixes) } else { $null }
 $verdict = 'timeout'
 try {
     [IO.File]::WriteAllText($prefs, ([Text.Encoding]::UTF8.GetString($prefsText) -replace '<devMode>False</devMode>', '<devMode>True</devMode>'))
+    if ($WithoutMods) {
+        $config = [Text.Encoding]::UTF8.GetString($modsConfigText)
+        foreach ($id in $WithoutMods) { $config = $config -replace "\s*<li>$([regex]::Escape($id))</li>", '' }
+        [IO.File]::WriteAllText($modsConfig, $config)
+    }
+    if ($Unhide) {
+        [IO.File]::WriteAllText($fixes, '<?xml version="1.0" encoding="utf-8"?><SettingsBlock><ModSettings Class="RimThreadedTTR.Fixes.FixesSettings"><stopSpam>False</stopSpam><hideHarmless>False</hideHarmless><quietLog>False</quietLog><nullTextureGuard>False</nullTextureGuard><meleeGuard>False</meleeGuard></ModSettings></SettingsBlock>')
+    }
     Copy-Item $build $live -Force
     $env:LP17_PROBE = $Mode; $env:LP17_PROBE_SAVE = $Save; $env:LP17_PROBE_OUT = $OutTable
     $start = Get-Date
@@ -47,5 +61,6 @@ finally {
     [IO.File]::WriteAllBytes($prefs, $prefsText)
     [IO.File]::WriteAllBytes($modsConfig, $modsConfigText)
     [IO.File]::WriteAllBytes($live, $liveDll)
+    if ($null -ne $fixesText) { [IO.File]::WriteAllBytes($fixes, $fixesText) } elseif (Test-Path $fixes) { Remove-Item $fixes }
 }
 "VERDICT $verdict after $([int]((Get-Date) - $start).TotalSeconds)s"
