@@ -31,6 +31,7 @@ namespace LP17Hotfix
             HideFlagsNoStub.Apply(); // before Dubs Performance Analyzer's GUI setup sets the flag
             YayoToolsCompat.Apply(); // before Show Me Your Tools patches at startup
             DefOfWrongType.Apply(); // before the game binds DefOfs
+            VanillaFemaleBody.Apply(); // queued behind each mod's content load, before anything can cache the body graphic
         }
     }
 
@@ -73,7 +74,105 @@ namespace LP17Hotfix
             AnimeVisitorsOnly.Apply();
             DesignatorsGroupByDef.Apply();
             JobWithoutDef.Apply();
+            ClassicRitualName.Apply();
+            HistoryBeforeGameStart.Apply();
+            MapPreviewRngCheck.Apply();
         }
+    }
+
+    static class MapPreviewRngCheck
+    {
+        // Maps generate on a background thread, where RimThreaded TTR gives Rand a state per thread. Map Preview's sanity check
+        // reads the main thread's counter there, so every new map reported whatever that counter had reached.
+        static int replaced;
+
+        internal static void Apply() => Lp.Run("map-preview-rng-check", () =>
+        {
+            MethodInfo m = AccessTools.Method("MapPreview.Patches.Patch_Verse_Map:FillComponents_Prefix");
+            if (m == null) return "Map Preview not active";
+            new Harmony(Lp.Id).Patch(m, transpiler: new HarmonyMethod(typeof(MapPreviewRngCheck), nameof(Transpiler)));
+            return replaced == 0 ? "check not found" : null;
+        });
+
+        static Map MapToCheck() => UnityData.IsInMainThread ? MapGenerator.mapBeingGenerated : null;
+
+        static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> code)
+        {
+            FieldInfo field = AccessTools.Field(typeof(MapGenerator), nameof(MapGenerator.mapBeingGenerated));
+            foreach (CodeInstruction i in code)
+            {
+                if (i.LoadsField(field)) { i.opcode = OpCodes.Call; i.operand = AccessTools.Method(typeof(MapPreviewRngCheck), nameof(MapToCheck)); replaced++; }
+                yield return i;
+            }
+        }
+    }
+
+    static class VanillaFemaleBody
+    {
+        const string Package = "zx.costumes";
+        const string BodiesFolder = "Things/Pawn/Humanlike/Bodies/";
+
+        // [ZA] Apparel bundles a copy of Realistic Body's female body, which replaces the vanilla one on every pawn.
+        // Its clothes stay. Lookups fall through to the game's own texture once these entries are gone.
+        internal static void Apply() => LongEventHandler.ExecuteWhenFinished(() => Lp.Run("vanilla-female-body", () =>
+        {
+            ModContentPack mod = null;
+            foreach (ModContentPack m in LoadedModManager.RunningMods)
+                if (string.Equals(m.PackageIdPlayerFacing, Package, StringComparison.OrdinalIgnoreCase)) mod = m;
+            if (mod == null) return Package + " not active";
+
+            ModContentHolder<Texture2D> holder = mod.GetContentHolder<Texture2D>();
+            List<string> keys = new List<string>();
+            foreach (string key in holder.contentList.Keys)
+                if (key.StartsWith(BodiesFolder, StringComparison.Ordinal)) keys.Add(key);
+            if (keys.Count == 0) return "no body textures in " + Package;
+
+            foreach (string key in keys)
+                if (Resources.Load<Texture2D>(GenFilePaths.ContentPath<Texture2D>() + key) == null) return "no vanilla texture for " + key;
+
+            KTrie.StringTrieSet trie = Traverse.Create(holder).Field("contentListTrie").GetValue<KTrie.StringTrieSet>();
+            foreach (string key in keys)
+            {
+                holder.contentList.Remove(key);
+                trie.Remove(key); // GetAllUnderPath reads the list through this
+            }
+            Lp.Note = keys.Count + " textures";
+            return null;
+        }));
+    }
+
+    static class ClassicRitualName
+    {
+        // Festival names are built from memes, the deity and the ideo adjective. A classic ideo has none, and the game's plain
+        // label fallback only runs when the ideo gives no rules at all, which its leader title prevents.
+        internal static void Apply() => Lp.Run("classic-ritual-name", () =>
+        {
+            new Harmony(Lp.Id).Patch(AccessTools.Method(typeof(RimWorld.Precept_Ritual), nameof(RimWorld.Precept_Ritual.GenerateNameRaw)), new HarmonyMethod(typeof(ClassicRitualName), nameof(Prefix)));
+            return null;
+        });
+
+        static bool Prefix(RimWorld.Precept_Ritual __instance, ref string __result)
+        {
+            RimWorld.Ideo ideo = __instance.ideo;
+            if (ideo == null || !ideo.memes.NullOrEmpty() || !ideo.adjective.NullOrEmpty() || ideo.KeyDeityName != null) return true;
+            __result = __instance.def.label;
+            return false;
+        }
+    }
+
+    static class HistoryBeforeGameStart
+    {
+        // Modern Notifications dates each history entry from TicksAbs, which has no value until the game starts. VFE Tribals
+        // finishes research on the starting-pawns page, so those entries logged an error. They are not worth keeping.
+        internal static void Apply() => Lp.Run("history-before-game-start", () =>
+        {
+            MethodInfo m = AccessTools.Method("ModernNotifications.OccasionsTracker:RecordHistory");
+            if (m == null) return "Modern Notifications not active";
+            new Harmony(Lp.Id).Patch(m, new HarmonyMethod(typeof(HistoryBeforeGameStart), nameof(Prefix)));
+            return null;
+        });
+
+        static bool Prefix() => Current.Game?.tickManager != null && Current.Game.tickManager.gameStartAbsTick != 0;
     }
 
     static class AnimeVisitorsOnly
