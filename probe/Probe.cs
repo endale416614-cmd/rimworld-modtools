@@ -14,6 +14,9 @@
 //            a face zoom on a colonist, that colonist walking in to tap and walking out, a doctor taking the dropped hemogen pack to transfuse a bleeding patient in a bed.
 //            It only changes the loaded game in memory (time of day, weather, camera, UI, a bed, the colonists' places and jobs) and saves nothing.
 //   newgame : load LP17_PROBE_SAVE, check the vanilla female body, generate classic ideos and record history before game start, then repeat with those fixes off as a control.
+//   select : load LP17_PROBE_SAVE, send double clicks through the engine's input path on furniture, walls, blueprints, animals and colonists, report what got selected and which
+//            commands the gizmo grid drew and click one, check short hashes, an egg hatching after its parent was discarded and quest drop spots, repeat with the fixes off as a
+//            control, then make a temporary save (deleted right after).
 // Every mode also writes exceptions that were thrown, caught or not, to LP17_PROBE_OUT.exceptions.tsv.
 // Every line starts with [PROBE so harness/proberun.ps1 can attribute errors to the step before them.
 using System;
@@ -42,7 +45,7 @@ namespace LP17Hotfix
             if (string.IsNullOrEmpty(mode)) return;
             AppDomain.CurrentDomain.FirstChanceException += (s, e) => CountException(e.Exception);
             if (mode == "static" || mode == "dump") new Harmony("local.lp17.probe").Patch(AccessTools.Method(typeof(Root_Entry), "Update"), postfix: new HarmonyMethod(typeof(Probe), nameof(MenuFrame)));
-            else if (mode == "soak" || mode == "gear" || mode == "scan" || mode == "autoresearch" || mode == "hemogentap" || mode == "bs9000gif" || mode == "newgame")
+            else if (mode == "soak" || mode == "gear" || mode == "scan" || mode == "autoresearch" || mode == "hemogentap" || mode == "bs9000gif" || mode == "newgame" || mode == "select")
             {
                 Harmony h = new Harmony("local.lp17.probe");
                 h.Patch(AccessTools.Method(typeof(Autosaver), "AutosaverTick"), prefix: new HarmonyMethod(typeof(Probe), nameof(No)));
@@ -358,7 +361,7 @@ namespace LP17Hotfix
             Log.ResetMessageCount();
             foreach (Window w in Find.WindowStack.Windows.ToList())
                 if (w.forcePause || w is Dialog_MessageBox || filming) w.Close(false);
-            if (run == null) { Log.Message("[PROBE] playing"); run = (mode == "gear" ? Gear() : mode == "scan" ? Scan() : mode == "autoresearch" ? AutoResearchTest() : mode == "hemogentap" ? BS9000Test() : mode == "bs9000gif" ? Bs9000Gif() : mode == "newgame" ? NewGameTest() : Soak()).GetEnumerator(); }
+            if (run == null) { Log.Message("[PROBE] playing"); run = (mode == "gear" ? Gear() : mode == "scan" ? Scan() : mode == "autoresearch" ? AutoResearchTest() : mode == "hemogentap" ? BS9000Test() : mode == "bs9000gif" ? Bs9000Gif() : mode == "newgame" ? NewGameTest() : mode == "select" ? SelectTest() : Soak()).GetEnumerator(); }
             Stopwatch sw = Stopwatch.StartNew();
             try
             {
@@ -372,6 +375,239 @@ namespace LP17Hotfix
         }
 
         static IEnumerable<int> Idle() { while (true) yield return 1; }
+
+        // ---- selection: double clicks through the engine's input path ----
+
+        static readonly Type inputState = AccessTools.TypeByName("Waylith.Input.InputState");
+        static readonly Type inputSystem = AccessTools.TypeByName("UnityEngine.InputSystem.InputSystem");
+        static readonly Queue<Action> injected = new Queue<Action>();
+        static readonly List<string> gridErrors = new List<string>();
+        static readonly FieldInfo gizmoGroups = AccessTools.Field(typeof(GizmoGridDrawer), "gizmoGroups");
+
+        // Both GLFW callbacks run right after InputState.BeginFrame, so this is where a real click would arrive.
+        static void InjectNow() { while (injected.Count > 0) injected.Dequeue()(); }
+
+        static Exception GridFinalizer(Exception __exception)
+        {
+            if (__exception != null && gridErrors.Count < 400) gridErrors.Add(__exception.GetType().Name + " at " + (__exception.StackTrace ?? "").Split('\n')[0].Trim());
+            return __exception;
+        }
+
+        static void MoveMouse(UnityEngine.Vector2 screen) => injected.Enqueue(() =>
+        {
+            AccessTools.Method(inputState, "OnMouseMove").Invoke(null, new object[] { new System.Numerics.Vector2(screen.x, UnityEngine.Screen.height - screen.y) });
+            AccessTools.Method(inputSystem, "QueueMouseMove").Invoke(null, new object[] { screen });
+        });
+
+        static object Left(ParameterInfo p) => p.ParameterType.IsEnum ? Enum.ToObject(p.ParameterType, 0) : Convert.ChangeType(0, p.ParameterType);
+
+        static void MouseButton(UnityEngine.Vector2 screen, bool down) => injected.Enqueue(() =>
+        {
+            MethodInfo state = AccessTools.Method(inputState, "OnMouseButton"), queue = AccessTools.Method(inputSystem, "QueueMouseButton");
+            state.Invoke(null, new object[] { Left(state.GetParameters()[0]), down, new System.Numerics.Vector2(screen.x, UnityEngine.Screen.height - screen.y) });
+            queue.Invoke(null, new object[] { Left(queue.GetParameters()[0]), down, screen });
+        });
+
+        static readonly Dictionary<string, UnityEngine.Vector2> commandsDrawn = new Dictionary<string, UnityEngine.Vector2>();
+        static readonly Dictionary<string, string> commandOwners = new Dictionary<string, string>();
+        static readonly List<string> windowsAdded = new List<string>();
+
+        static void CommandDrawn(Command __instance, UnityEngine.Vector2 __0)
+        {
+            try
+            {
+                commandsDrawn[__instance.LabelCap] = __0;
+                commandOwners[__instance.LabelCap] = (__instance as Command_Action)?.action?.Method.DeclaringType?.FullName ?? __instance.GetType().FullName;
+            }
+            catch (Exception e) { commandsDrawn["label threw " + e.GetType().Name] = __0; }
+        }
+
+        static void WindowAdded(Window window) => windowsAdded.Add(window.GetType().Name);
+
+        // The code of designators-group-by-def before it skipped Designator_Install, for the control pass.
+        static void OldGroupsWithPostfix(Command __instance, Gizmo other, ref bool __result)
+        {
+            if (!__result) return;
+            BuildableDef Placed(Gizmo g)
+            {
+                if (g is Designator_Dropdown d) g = d.Elements.Count > 0 ? d.Elements[0] : null;
+                return (g as Designator_Place)?.PlacingDef;
+            }
+            BuildableDef a = Placed(__instance), b = Placed(other);
+            if (a != null && b != null && a != b) __result = false;
+        }
+
+        static long pressedAt;
+
+        static IEnumerable<int> DoubleClick(string label, Thing thing, int gapMs, string click = null)
+        {
+            Find.Selector.ClearSelection();
+            Find.WindowStack.TryRemove(typeof(LudeonTK.EditWindow_Log), false);
+            Find.CameraDriver.SetRootPosAndSize(thing.DrawPos, 24f);
+            Stopwatch settle = Stopwatch.StartNew();
+            while (settle.ElapsedMilliseconds < 1000) yield return 1; // past the double click time, so the click count starts over
+            UnityEngine.Vector3 s = Find.Camera.WorldToScreenPoint(thing.DrawPos);
+            UnityEngine.Vector2 screen = new UnityEngine.Vector2(s.x, s.y);
+            MoveMouse(screen);
+            foreach (int f in Frames(3)) yield return f;
+            IntVec3 under = UI.MouseCell();
+            gridErrors.Clear();
+            pressedAt = 0;
+            injected.Enqueue(() => pressedAt = Stopwatch.GetTimestamp());
+            MouseButton(screen, true);
+            yield return 1;
+            yield return 1;
+            MouseButton(screen, false);
+            yield return 1;
+            yield return 1;
+            int afterFirst = Find.Selector.NumSelected;
+            while (pressedAt == 0 || (Stopwatch.GetTimestamp() - pressedAt) * 1000 / Stopwatch.Frequency < gapMs) yield return 1;
+            long gap = (Stopwatch.GetTimestamp() - pressedAt) * 1000 / Stopwatch.Frequency;
+            MouseButton(screen, true);
+            yield return 1;
+            yield return 1;
+            MouseButton(screen, false);
+            foreach (int f in Frames(4)) yield return f;
+            commandsDrawn.Clear();
+            foreach (int f in Frames(4)) yield return f;
+            List<object> selected = Find.Selector.SelectedObjects;
+            Log.Message($"[PROBE] select {label}: {thing.def.defName} at {thing.Position}, mouse cell {under}, press gap {gap} ms, after first click {afterFirst}, after second {selected.Count}, defs {string.Join("/", selected.OfType<Thing>().Select(t => t.def.defName).Distinct().Take(4))}, grid errors {gridErrors.Count}{(gridErrors.Count > 0 ? " (" + gridErrors[0] + ")" : "")}, commands drawn {commandsDrawn.Count}: {string.Join(", ", commandsDrawn.Keys)}");
+
+            if (click == null) yield break;
+            foreach (string wanted in click.Split('|'))
+            {
+                string target = commandsDrawn.Keys.FirstOrDefault(k => k.IndexOf(wanted, StringComparison.OrdinalIgnoreCase) >= 0);
+                if (target == null) { Log.Message($"[PROBE] select {label}: no command matching '{wanted}' to click"); continue; }
+                UnityEngine.Vector2 ui = commandsDrawn[target] + new UnityEngine.Vector2(37f, 37f);
+                UnityEngine.Vector2 button = new UnityEngine.Vector2(ui.x * Prefs.UIScale, UnityEngine.Screen.height - ui.y * Prefs.UIScale);
+                windowsAdded.Clear();
+                gridErrors.Clear();
+                MoveMouse(button);
+                foreach (int f in Frames(3)) yield return f;
+                MouseButton(button, true);
+                yield return 1;
+                yield return 1;
+                MouseButton(button, false);
+                foreach (int f in Frames(4)) yield return f;
+                commandsDrawn.Clear();
+                foreach (int f in Frames(4)) yield return f;
+                Log.Message($"[PROBE] select {label}: clicked '{target}' ({commandOwners[target]}): designator {Find.DesignatorManager.SelectedDesignator?.GetType().Name}, windows opened {string.Join(",", windowsAdded)}, selected {Find.Selector.NumSelected}, grid errors {gridErrors.Count}, commands drawn {commandsDrawn.Count}: {string.Join(", ", commandsDrawn.Keys)}");
+                Find.DesignatorManager.Deselect();
+                foreach (Window w in Find.WindowStack.Windows.ToList()) w.Close(false);
+                foreach (int f in Frames(3)) yield return f;
+            }
+        }
+
+        static string PatchOwners(MethodBase m)
+        {
+            Patches p = Harmony.GetPatchInfo(m);
+            return p == null ? "none" : string.Join("; ", p.Prefixes.Select(x => "pre " + x.owner).Concat(p.Postfixes.Select(x => "post " + x.owner)).Concat(p.Transpilers.Select(x => "trans " + x.owner)).Concat(p.Finalizers.Select(x => "fin " + x.owner)));
+        }
+
+        static IEnumerable<int> SelectPass(string pass, Map map, List<(string label, Thing thing, string click)> cases)
+        {
+            foreach ((string label, Thing thing, string click) in cases)
+            {
+                foreach (int f in DoubleClick($"{pass} {label}", thing, 150, click)) yield return f;
+                foreach (int f in DoubleClick($"{pass} {label} slow", thing, 400)) yield return f;
+            }
+            Find.Selector.ClearSelection();
+
+            PawnKindDef chicken = PawnKindDef.Named("Chicken");
+            IntVec3 cell = map.mapPawns.FreeColonistsSpawned.First().Position;
+            Pawn parent = PawnGenerator.GeneratePawn(chicken, Faction.OfPlayer);
+            GenSpawn.Spawn(parent, cell, map);
+            parent.Destroy();
+            if (Find.WorldPawns.Contains(parent)) Find.WorldPawns.RemovePawn(parent);
+            if (!parent.Discarded) parent.Discard();
+            Thing egg = ThingMaker.MakeThing(ThingDef.Named("EggChickenFertilized"));
+            CompHatcher hatcher = egg.TryGetComp<CompHatcher>();
+            hatcher.hatcheeParent = parent;
+            hatcher.hatcheeFaction = Faction.OfPlayer;
+            GenSpawn.Spawn(egg, cell, map);
+            hatcher.Hatch();
+            List<Pawn> hatched = map.mapPawns.AllPawnsSpawned.Where(p => p.kindDef == chicken && p.thingIDNumber > parent.thingIDNumber).ToList();
+            Log.Message($"[PROBE] {pass} hatched {hatched.Count} from an egg of a parent with Discarded={parent.Discarded}, relations to it: {hatched.Sum(p => p.relations.DirectRelations.Count(r => r.otherPawn == parent))}");
+            foreach (Pawn p in hatched) p.relations.ClearAllRelations(); // so the control's relation does not reach the temporary save
+            foreach (Pawn p in hatched) p.Destroy();
+
+            QuestPart_DropPods pods = new QuestPart_DropPods { mapParent = map.Parent };
+            MethodInfo randomSpot = AccessTools.Method(typeof(QuestPart_DropPods), "GetRandomDropSpot");
+            int spots = 2000, inWater = 0, noLanding = 0;
+            for (int i = 0; i < spots; i++)
+            {
+                IntVec3 spot = (IntVec3)randomSpot.Invoke(pods, null);
+                if (spot.GetTerrain(map).IsWater) inWater++;
+                if (!DropCellFinder.TryFindDropSpotNear(spot, map, out IntVec3 _, false, true)) noLanding++;
+                if (i % 100 == 99) yield return 1;
+            }
+            Log.Message($"[PROBE] {pass} quest drop spots: {spots} picks, {inWater} in water, {noLanding} with no landing cell near");
+        }
+
+        static IEnumerable<int> SelectTest()
+        {
+            Find.TickManager.CurTimeSpeed = TimeSpeed.Paused;
+            Map map = Find.AnyPlayerHomeMap;
+            Current.Game.CurrentMap = map;
+            Harmony h = new Harmony("local.lp17.probe");
+            h.Patch(AccessTools.Method(inputState, "BeginFrame"), postfix: new HarmonyMethod(typeof(Probe), nameof(InjectNow)));
+            h.Patch(AccessTools.Method(typeof(GizmoGridDrawer), nameof(GizmoGridDrawer.DrawGizmoGrid)), finalizer: new HarmonyMethod(typeof(Probe), nameof(GridFinalizer)));
+            h.Patch(AccessTools.Method(typeof(Command), nameof(Command.GizmoOnGUI)), prefix: new HarmonyMethod(typeof(Probe), nameof(CommandDrawn)));
+            h.Patch(AccessTools.Method(typeof(WindowStack), nameof(WindowStack.Add)), prefix: new HarmonyMethod(typeof(Probe), nameof(WindowAdded)));
+
+            foreach (string name in new[] { "HandleMapClicks", "SelectorOnGUI", "SelectUnderMouse", "SelectAllMatchingObjectUnderMouseOnScreen", "SelectInsideDragBox", "Select", "ClearSelection" })
+                Log.Message($"[PROBE] patches Selector.{name}: {PatchOwners(AccessTools.Method(typeof(Selector), name))}");
+            Log.Message($"[PROBE] patches MultiSelectableThingsInScreenRectDistinct: {PatchOwners(AccessTools.Method(typeof(ThingSelectionUtility), nameof(ThingSelectionUtility.MultiSelectableThingsInScreenRectDistinct)))}");
+            Log.Message($"[PROBE] patches SelectableByMapClick: {PatchOwners(AccessTools.Method(typeof(ThingSelectionUtility), nameof(ThingSelectionUtility.SelectableByMapClick)))}");
+            Log.Message($"[PROBE] patches DrawGizmoGrid: {PatchOwners(AccessTools.Method(typeof(GizmoGridDrawer), nameof(GizmoGridDrawer.DrawGizmoGrid)))}");
+            Log.Message($"[PROBE] patches Command.GroupsWith: {PatchOwners(AccessTools.Method(typeof(Command), nameof(Command.GroupsWith)))}");
+
+            Dictionary<ushort, List<string>> byHash = new Dictionary<ushort, List<string>>();
+            foreach (ThingDef d in DefDatabase<ThingDef>.AllDefs)
+            {
+                if (!byHash.TryGetValue(d.shortHash, out List<string> names)) byHash[d.shortHash] = names = new List<string>();
+                names.Add(d.defName);
+            }
+            List<List<string>> clashes = byHash.Values.Where(n => n.Count > 1).ToList();
+            Log.Message($"[PROBE] short hash clashes {clashes.Count}: {string.Join("; ", clashes.Take(10).Select(n => string.Join(" = ", n)))}; RP_ defs {DefDatabase<ThingDef>.AllDefs.Count(d => d.defName.StartsWith("RP_Diffusecyst"))}, frames {DefDatabase<ThingDef>.AllDefs.Count(d => d.defName.EndsWith("_ReplaceStuff"))}");
+
+            IEnumerable<Thing> Grouped(Func<Thing, bool> where) => map.listerThings.AllThings.Where(t => t.Faction == Faction.OfPlayer && !t.Position.Fogged(map) && where(t)).GroupBy(t => t.def).Where(g => g.Count() >= 3).OrderByDescending(g => g.Count()).Select(g => g.First());
+            ThingDef chair = ThingDef.Named("DiningChair");
+            IntVec3 center = map.mapPawns.FreeColonistsSpawned.First().Position;
+            List<IntVec3> free = GenRadial.RadialCellsAround(center, 25f, true).Where(c => c.InBounds(map) && !c.Fogged(map) && !c.Roofed(map) && c.GetThingList(map).Count == 0 && GenConstruct.CanPlaceBlueprintAt(chair, c, Rot4.North, map, false, null, null, GenStuff.DefaultStuffFor(chair)).Accepted && !c.GetTerrain(map).IsWater).Take(3).ToList();
+            foreach (var g in DefDatabase<ThingDef>.AllDefs.Where(d => d.neverMultiSelect).GroupBy(d => d.category)) Log.Message($"[PROBE] neverMultiSelect {g.Key}: {g.Count()}, sample {string.Join(",", g.Take(6).Select(d => d.defName))}");
+            Log.Message("[PROBE] neverMultiSelect furniture: " + string.Join(",", DefDatabase<ThingDef>.AllDefs.Where(d => d.neverMultiSelect && d.category == ThingCategory.Building && d.Minifiable).Take(30).Select(d => d.defName)));
+            List<Thing> blueprints = free.Select(c => (Thing)GenConstruct.PlaceBlueprintForBuild(chair, c, map, Rot4.North, Faction.OfPlayer, GenStuff.DefaultStuffFor(chair))).ToList();
+            Log.Message($"[PROBE] blueprints placed {blueprints.Count}, chair can be styled {ThingStyleHelper.CanBeStyled(chair)}, classic ideo {Find.IdeoManager.classicMode}");
+
+            List<(string, Thing, string)> cases = new List<(string, Thing, string)>
+            {
+                ("furniture", Grouped(t => t is Building && t.def.Minifiable).FirstOrDefault(t => t.def.category == ThingCategory.Building), "Copy|Deconstruct"),
+                ("styleable", Grouped(t => t is Building && t.def.Minifiable && ThingStyleHelper.CanBeStyled(t.def)).FirstOrDefault(t => t.def.category == ThingCategory.Building), "style"),
+                ("wall", Grouped(t => t is Building && !t.def.Minifiable && t.def.fillPercent >= 1f).FirstOrDefault(), "Select similar|style"),
+                ("blueprint", blueprints.FirstOrDefault(), "style"),
+                ("animal", map.mapPawns.SpawnedColonyAnimals.GroupBy(p => p.def).Where(g => g.Count() >= 2).Select(g => (Thing)g.First()).FirstOrDefault(), null),
+                ("colonist", map.mapPawns.FreeColonistsSpawned.FirstOrDefault(), null),
+            };
+            cases.RemoveAll(c => c.Item2 == null);
+
+            foreach (int f in SelectPass("fixed", map, cases)) yield return f;
+
+            Harmony hot = new Harmony(Lp.Id);
+            hot.Unpatch(AccessTools.Method(typeof(Command), nameof(Command.GroupsWith)), HarmonyPatchType.All, Lp.Id);
+            h.Patch(AccessTools.Method(typeof(Command), nameof(Command.GroupsWith)), postfix: new HarmonyMethod(typeof(Probe), nameof(OldGroupsWithPostfix)));
+            hot.Unpatch(AccessTools.Method(inputState, "OnMouseButton"), HarmonyPatchType.All, Lp.Id);
+            hot.Unpatch(AccessTools.Method(typeof(Pawn_RelationsTracker), nameof(Pawn_RelationsTracker.AddDirectRelation)), HarmonyPatchType.All, Lp.Id);
+            hot.Unpatch(AccessTools.Method(typeof(QuestPart_DropPods), "GetRandomDropSpot"), HarmonyPatchType.All, Lp.Id);
+            foreach (int f in SelectPass("control", map, cases)) yield return f;
+
+            foreach (Thing b in blueprints) if (b.Spawned) b.Destroy();
+            Mark("temporary save");
+            GameDataSaveLoader.SaveGame("LP17ProbeTemp");
+            File.Delete(GenFilePaths.FilePathForSavedGame("LP17ProbeTemp"));
+            Mark("saved");
+            foreach (int f in Frames(10)) yield return f;
+        }
 
         // ---- new game page fixes: body texture, classic ideo ritual names, history before game start ----
 

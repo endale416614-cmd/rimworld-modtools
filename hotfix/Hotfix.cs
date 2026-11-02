@@ -4,6 +4,7 @@ using System.IO;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text;
 using HarmonyLib;
 using RimWorld.Planet;
@@ -32,6 +33,7 @@ namespace LP17Hotfix
             YayoToolsCompat.Apply(); // before Show Me Your Tools patches at startup
             DefOfWrongType.Apply(); // before the game binds DefOfs
             VanillaFemaleBody.Apply(); // queued behind each mod's content load, before anything can cache the body graphic
+            AllsparkShortHashes.Apply(); // before Allspark Crisis generates its defs at startup, which comes before this mod's own startup hook
         }
     }
 
@@ -77,6 +79,10 @@ namespace LP17Hotfix
             ClassicRitualName.Apply();
             HistoryBeforeGameStart.Apply();
             MapPreviewRngCheck.Apply();
+            RelationToDiscardedPawn.Apply();
+            QuestDropSpotOnLand.Apply();
+            IsekaiDungeonNotice.Apply();
+            DoubleClickWindow.Apply();
         }
     }
 
@@ -250,7 +256,7 @@ namespace LP17Hotfix
         static BuildableDef Placed(Gizmo g)
         {
             if (g is RimWorld.Designator_Dropdown d) g = d.Elements.Count > 0 ? d.Elements[0] : null;
-            return (g as RimWorld.Designator_Place)?.PlacingDef;
+            return (g as RimWorld.Designator_Build)?.PlacingDef; // Designator_Install's throws unless exactly one thing is selected
         }
 
         static void Postfix(Command __instance, Gizmo other, ref bool __result)
@@ -258,6 +264,94 @@ namespace LP17Hotfix
             if (!__result) return;
             BuildableDef a = Placed(__instance), b = Placed(other);
             if (a != null && b != null && a != b) __result = false;
+        }
+    }
+
+    static class RelationToDiscardedPawn
+    {
+        // An egg remembers its parents and CompHatcher.Hatch adds the relation even if a parent was discarded after laying. A discarded
+        // pawn cannot be saved, so every save warned about it and the next load dropped the relation with another warning.
+        internal static void Apply() => Lp.Run("relation-to-discarded-pawn", () =>
+        {
+            new Harmony(Lp.Id).Patch(AccessTools.Method(typeof(RimWorld.Pawn_RelationsTracker), nameof(RimWorld.Pawn_RelationsTracker.AddDirectRelation)), prefix: new HarmonyMethod(typeof(RelationToDiscardedPawn), nameof(Prefix)));
+            return null;
+        });
+
+        static bool Prefix(Pawn otherPawn) => otherPawn == null || !otherPawn.Discarded;
+    }
+
+    static class QuestDropSpotOnLand
+    {
+        // QuestPart_DropPods picks its own random spot without the water check DropCellFinder.RandomDropSpot has, and pods do not land
+        // in water, so on a coast map a spot out in the shallows made DropThingsNear warn and fall back to any walkable cell.
+        internal static void Apply() => Lp.Run("quest-drop-spot-on-land", () =>
+        {
+            new Harmony(Lp.Id).Patch(AccessTools.Method(typeof(RimWorld.QuestPart_DropPods), "GetRandomDropSpot"), postfix: new HarmonyMethod(typeof(QuestDropSpotOnLand), nameof(Postfix)));
+            return null;
+        });
+
+        static void Postfix(RimWorld.Planet.MapParent ___mapParent, ref IntVec3 __result)
+        {
+            Map map = ___mapParent.Map;
+            if (__result.IsValid && __result.GetTerrain(map).IsWater) __result = RimWorld.DropCellFinder.RandomDropSpot(map);
+        }
+    }
+
+    static class AllsparkShortHashes
+    {
+        // Allspark Crisis checks its generated defs' short hashes against a set of its own, so the game's set never hears of them and
+        // Replace Stuff later gives its frames the same numbers, which logs a hash collision on every load.
+        internal static void Apply() => Lp.Run("allspark-short-hashes", () =>
+        {
+            MethodInfo give = AccessTools.Method("AllsparkCrisis.BiometalDefGenerator:GiveShortHash");
+            if (give == null) return "Allspark Crisis not loaded";
+            new Harmony(Lp.Id).Patch(give, postfix: new HarmonyMethod(typeof(AllsparkShortHashes), nameof(Postfix)));
+            return null;
+        });
+
+        static readonly FieldInfo Taken = AccessTools.Field(typeof(ShortHashGiver), "takenHashesPerDeftype");
+
+        static void Postfix(Def __0) => ((Dictionary<Type, HashSet<ushort>>)Taken.GetValue(null))[typeof(ThingDef)].Add(__0.shortHash);
+    }
+
+    static class IsekaiDungeonNotice
+    {
+        static readonly MethodInfo Warning = AccessTools.Method(typeof(Log), "Warning", new[] { typeof(string) });
+        static readonly MethodInfo Message = AccessTools.Method(typeof(Log), "Message", new[] { typeof(string) });
+
+        // The room is placed and nothing overlaps: tighter spacing is the layout's normal answer to a crowded map, not a warning.
+        internal static void Apply() => Lp.Run("isekai-dungeon-notice", () =>
+        {
+            MethodInfo place = AccessTools.Method("IsekaiDungeons.DungeonLayoutPlan:TryPlaceRoom");
+            if (place == null) return "Isekai Dungeons not loaded";
+            new Harmony(Lp.Id).Patch(place, transpiler: new HarmonyMethod(typeof(IsekaiDungeonNotice), nameof(Transpiler)));
+            return null;
+        });
+
+        static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> code) => NoticeSwap.Replace(code, "room placed with relaxed", Warning, Message);
+    }
+
+    static class DoubleClickWindow
+    {
+        // The engine counts two clicks as a double click only within 0.3 s, where Windows allows 0.5 s by default, so a double click
+        // at an ordinary pace selected one thing instead of all of its kind on screen. This uses the time set in Windows.
+        [DllImport("user32.dll")] static extern uint GetDoubleClickTime();
+
+        internal static void Apply() => Lp.Run("double-click-window", () =>
+        {
+            MethodInfo button = AccessTools.Method("Waylith.Input.InputState:OnMouseButton");
+            if (button == null) return "engine input not found";
+            new Harmony(Lp.Id).Patch(button, transpiler: new HarmonyMethod(typeof(DoubleClickWindow), nameof(Transpiler)));
+            return null;
+        });
+
+        static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> code)
+        {
+            List<CodeInstruction> list = new List<CodeInstruction>(code);
+            CodeInstruction window = list.Find(c => c.opcode == OpCodes.Ldc_R8 && (double)c.operand == 0.3);
+            if (window == null) throw new InvalidOperationException("click window not found");
+            window.operand = GetDoubleClickTime() / 1000.0;
+            return list;
         }
     }
 
