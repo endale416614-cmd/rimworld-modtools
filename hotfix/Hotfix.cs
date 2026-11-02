@@ -72,6 +72,7 @@ namespace LP17Hotfix
             HiveLookupNoMap.Apply();
             AnimeVisitorsOnly.Apply();
             DesignatorsGroupByDef.Apply();
+            JobWithoutDef.Apply();
         }
     }
 
@@ -158,6 +159,28 @@ namespace LP17Hotfix
             if (!__result) return;
             BuildableDef a = Placed(__instance), b = Placed(other);
             if (a != null && b != null && a != b) __result = false;
+        }
+    }
+
+    static class JobWithoutDef
+    {
+        // A job whose def was missing when the game saved loads with no def, and the pawn then throws on every tick, draw and
+        // thought check. Dropped here because the map is ready by now, and ending the job also frees what it reserved.
+        internal static void Apply() => Lp.Run("job-without-def", () =>
+        {
+            new Harmony(Lp.Id).Patch(AccessTools.Method(typeof(Pawn), nameof(Pawn.PostMapInit)), prefix: new HarmonyMethod(typeof(JobWithoutDef), nameof(Prefix)));
+            return null;
+        });
+
+        static void Prefix(Pawn __instance)
+        {
+            Verse.AI.Pawn_JobTracker jobs = __instance.jobs;
+            if (jobs == null) return;
+            for (int i = jobs.jobQueue.Count - 1; i >= 0; i--)
+                if (jobs.jobQueue[i].job.def == null) jobs.jobQueue.Extract(jobs.jobQueue[i].job);
+            if (jobs.curJob == null || jobs.curJob.def != null) return;
+            jobs.curJob.def = RimWorld.JobDefOf.Wait; // ending a job reads its def
+            jobs.EndCurrentJob(Verse.AI.JobCondition.Errored, startNewJob: false); // the tracker finds a new one on the next tick
         }
     }
 
