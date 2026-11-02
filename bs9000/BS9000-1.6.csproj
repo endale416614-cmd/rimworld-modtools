@@ -1,0 +1,27 @@
+<Project>
+  <!-- RimWorld 1.6 build: same BS9000.cs, net472 against the 1.6 reference assemblies (RW16 is defined only here). -->
+  <!-- BaseIntermediateOutputPath is set before the SDK props so restore and build use obj\1.6\ and leave BS9000.csproj's obj\ files alone. -->
+  <PropertyGroup>
+    <BaseIntermediateOutputPath>obj\1.6\</BaseIntermediateOutputPath>
+  </PropertyGroup>
+  <Import Project="Sdk.props" Sdk="Microsoft.NET.Sdk" />
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>BS9000</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <OutputPath>bin\Release-1.6\</OutputPath>
+    <DebugType>none</DebugType>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <DefineConstants>$(DefineConstants);RW16</DefineConstants>
+    <!-- The whole obj\ tree also holds BS9000.csproj's generated .cs files; bin\, tools\ and dist\ are not source. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);bin\**;obj\**;tools\**;dist\**</DefaultItemExcludes>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Krafs.Rimworld.Ref" Version="1.6.4871" PrivateAssets="all" />
+  </ItemGroup>
+  <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />
+</Project>

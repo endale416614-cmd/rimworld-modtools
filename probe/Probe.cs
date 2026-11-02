@@ -8,6 +8,12 @@
 //            then time every Harmony patch and game component over LP17_PROBE_TICKS ticks to LP17_PROBE_OUT.perf.tsv.
 //   autoresearch : load LP17_PROBE_SAVE, click YART QoL's auto research button and run research out in memory, checking each pick.
 //            Writes LP17_PROBE_OUT.picks.tsv and .remaining.tsv. Its only save is a temporary one for the reload check, deleted right after.
+//   hemogentap : load LP17_PROBE_SAVE, check the Hemogen Tap research project gates its fabrication bench recipe and unlocks the implant, give a colonist the implant,
+//            check its gizmo toggle switches the tap off and on, check one day's tick drops one hemogen pack and caps blood loss at 0.44 and that a second tick does nothing.
+//   bs9000gif : load LP17_PROBE_SAVE and stage a scene for a screen recording on a clear patch of the map, in three cuts marked by the log lines "[PROBE] cut1 start" to "[PROBE] cut3 end":
+//            a face zoom on a colonist, that colonist walking in to tap and walking out, a doctor taking the dropped hemogen pack to transfuse a bleeding patient in a bed.
+//            It only changes the loaded game in memory (time of day, weather, camera, UI, a bed, the colonists' places and jobs) and saves nothing.
+//   newgame : load LP17_PROBE_SAVE, check the vanilla female body, generate classic ideos and record history before game start, then repeat with those fixes off as a control.
 // Every mode also writes exceptions that were thrown, caught or not, to LP17_PROBE_OUT.exceptions.tsv.
 // Every line starts with [PROBE so harness/proberun.ps1 can attribute errors to the step before them.
 using System;
@@ -20,6 +26,7 @@ using System.Runtime.CompilerServices;
 using HarmonyLib;
 using RimWorld;
 using Verse;
+using Verse.AI;
 
 namespace LP17Hotfix
 {
@@ -35,17 +42,29 @@ namespace LP17Hotfix
             if (string.IsNullOrEmpty(mode)) return;
             AppDomain.CurrentDomain.FirstChanceException += (s, e) => CountException(e.Exception);
             if (mode == "static" || mode == "dump") new Harmony("local.lp17.probe").Patch(AccessTools.Method(typeof(Root_Entry), "Update"), postfix: new HarmonyMethod(typeof(Probe), nameof(MenuFrame)));
-            else if (mode == "soak" || mode == "gear" || mode == "scan" || mode == "autoresearch")
+            else if (mode == "soak" || mode == "gear" || mode == "scan" || mode == "autoresearch" || mode == "hemogentap" || mode == "bs9000gif" || mode == "newgame")
             {
                 Harmony h = new Harmony("local.lp17.probe");
                 h.Patch(AccessTools.Method(typeof(Autosaver), "AutosaverTick"), prefix: new HarmonyMethod(typeof(Probe), nameof(No)));
                 h.Patch(AccessTools.Method(typeof(Autosaver), "DoAutosave"), prefix: new HarmonyMethod(typeof(Probe), nameof(No)));
                 h.Patch(AccessTools.Method(typeof(TickManager), "TickManagerUpdate"), postfix: new HarmonyMethod(typeof(Probe), nameof(Frame)));
-                LongEventHandler.ExecuteWhenFinished(() => { Log.Message("[PROBE] loading " + save); GameDataSaveLoader.LoadGame(save); });
+                // A save whose mod list differs from the active one (the recording runs a short list plus this mod) would wait on a confirm dialog; skip it.
+                h.Patch(AccessTools.Method(typeof(ScribeMetaHeaderUtility), nameof(ScribeMetaHeaderUtility.TryCreateDialogsForVersionMismatchWarnings)), prefix: new HarmonyMethod(typeof(Probe), nameof(NoMismatchDialog)));
+                h.Patch(AccessTools.Method(typeof(PawnUIOverlay), nameof(PawnUIOverlay.DrawPawnGUIOverlay)), prefix: new HarmonyMethod(typeof(Probe), nameof(NoLabelsWhileFilming))); // name labels draw even in screenshot mode
+                LongEventHandler.ExecuteWhenFinished(() =>
+                {
+                    Log.Message("[PROBE] loading " + save);
+                    if (string.IsNullOrEmpty(save)) LongEventHandler.QueueLongEvent(() => { Root_Play.SetupForQuickTestPlay(); PageUtility.InitGameStart(); }, "GeneratingMap", true, null);
+                    else GameDataSaveLoader.LoadGame(save);
+                });
             }
         }
 
         static bool No() => false;
+
+        static bool NoMismatchDialog(ref bool __result) { __result = false; return false; }
+
+        static bool NoLabelsWhileFilming() => !filming;
 
         // ---- exceptions, shown in the log or not ----
 
@@ -338,8 +357,8 @@ namespace LP17Hotfix
             if (Current.ProgramState != ProgramState.Playing) return;
             Log.ResetMessageCount();
             foreach (Window w in Find.WindowStack.Windows.ToList())
-                if (w.forcePause || w is Dialog_MessageBox) w.Close(false);
-            if (run == null) { Log.Message("[PROBE] playing"); run = (mode == "gear" ? Gear() : mode == "scan" ? Scan() : mode == "autoresearch" ? AutoResearchTest() : Soak()).GetEnumerator(); }
+                if (w.forcePause || w is Dialog_MessageBox || filming) w.Close(false);
+            if (run == null) { Log.Message("[PROBE] playing"); run = (mode == "gear" ? Gear() : mode == "scan" ? Scan() : mode == "autoresearch" ? AutoResearchTest() : mode == "hemogentap" ? BS9000Test() : mode == "bs9000gif" ? Bs9000Gif() : mode == "newgame" ? NewGameTest() : Soak()).GetEnumerator(); }
             Stopwatch sw = Stopwatch.StartNew();
             try
             {
@@ -353,6 +372,55 @@ namespace LP17Hotfix
         }
 
         static IEnumerable<int> Idle() { while (true) yield return 1; }
+
+        // ---- new game page fixes: body texture, classic ideo ritual names, history before game start ----
+
+        static void ClassicIdeos()
+        {
+            IdeoGenerationParms parms = new IdeoGenerationParms(Find.FactionManager.OfPlayer.def);
+            List<CultureDef> cultures = DefDatabase<CultureDef>.AllDefs.Where(c => Find.FactionManager.OfPlayer.def.allowedCultures.Contains(c)).ToList();
+            if (cultures.Count == 0) cultures = DefDatabase<CultureDef>.AllDefsListForReading;
+            for (int i = 0; i < 30; i++) IdeoGenerator.GenerateClassicIdeo(cultures[i % cultures.Count], parms, noExpansionIdeo: false);
+        }
+
+        static IEnumerable<int> NewGameTest()
+        {
+            const string path = "Things/Pawn/Humanlike/Bodies/Naked_Female_south";
+            UnityEngine.Texture2D found = ContentFinder<UnityEngine.Texture2D>.Get(path), vanilla = UnityEngine.Resources.Load<UnityEngine.Texture2D>(GenFilePaths.ContentPath<UnityEngine.Texture2D>() + path);
+            ModContentPack za = LoadedModManager.RunningMods.FirstOrDefault(m => m.PackageIdPlayerFacing.ToLowerInvariant() == "zx.costumes");
+            bool zaHolds = za != null && za.GetContentHolder<UnityEngine.Texture2D>().contentList.Keys.Any(k => k.Contains("Naked_"));
+            int under = za == null ? -1 : za.GetContentHolder<UnityEngine.Texture2D>().GetAllUnderPath("Things/Pawn/Humanlike/Bodies").Count();
+            Log.Message($"[PROBE] body: za active={za != null}, za holds body={zaHolds}, listed under path={under}, found={found != null}, same as game's={found == vanilla}");
+            yield return 1;
+
+            Type tracker = AccessTools.TypeByName("ModernNotifications.OccasionsTracker");
+            MethodInfo record = AccessTools.Method(tracker, "RecordHistory");
+            System.Collections.IList history = (System.Collections.IList)AccessTools.Field(tracker, "_history").GetValue(AccessTools.Property(tracker, "Instance").GetValue(null));
+            object[] entry = { Enum.ToObject(record.GetParameters()[0].ParameterType, 0), "probe", "", "" };
+            TickManager ticks = Find.TickManager;
+            int start = ticks.gameStartAbsTick;
+
+            Log.Message("[PROBE] fixed start");
+            ClassicIdeos();
+            int before = history.Count;
+            ticks.gameStartAbsTick = 0;
+            record.Invoke(null, entry);
+            ticks.gameStartAbsTick = start;
+            Log.Message($"[PROBE] fixed end: history added={history.Count - before} (want 0)");
+            yield return 1;
+
+            // Same steps with the fixes off: these errors must appear, or the test above proves nothing.
+            Harmony h = new Harmony("local.lp17.hotfix");
+            h.Unpatch(AccessTools.Method(typeof(Precept_Ritual), nameof(Precept_Ritual.GenerateNameRaw)), HarmonyPatchType.Prefix, "local.lp17.hotfix");
+            h.Unpatch(record, HarmonyPatchType.Prefix, "local.lp17.hotfix");
+            Log.Message("[PROBE] control start");
+            ClassicIdeos();
+            before = history.Count;
+            ticks.gameStartAbsTick = 0;
+            record.Invoke(null, entry);
+            ticks.gameStartAbsTick = start;
+            Log.Message($"[PROBE] control end: history added={history.Count - before} (want 1)");
+        }
 
         static void Guard(string what, Action a)
         {
@@ -780,6 +848,324 @@ namespace LP17Hotfix
             Shot("off, nothing left");
             for (int i = 0; i < 30; i++) yield return 1;
             Log.Message($"[PROBE] auto research failures: {autoFails}");
+        }
+
+        // ---- Hemogen Tap ----
+
+        static string tapMessage;
+
+        static void TapMessagePre(Message msg) => tapMessage = msg.text;
+
+        static float BloodLoss(Pawn pawn) => pawn.health.hediffSet.GetFirstHediffOfDef(HediffDefOf.BloodLoss)?.Severity ?? 0f;
+
+        // Counts stacked items, since a pack placed Near merges into a stack that has room.
+        static int Packs(Map map) => map.listerThings.ThingsOfDef(ThingDefOf.HemogenPack).Sum(t => t.stackCount);
+
+        static IEnumerable<int> BS9000Test()
+        {
+            bool active = ModsConfig.IsActive("local.hemogen.tap");
+            Expect(active, "mod local.hemogen.tap is active");
+            // The mod's types are only used inside BS9000Run, so an inactive mod ends the run with a FAIL instead of a step that throws.
+            if (active) foreach (int x in BS9000Run()) yield return x;
+            Log.Message($"[PROBE] hemogen tap failures: {autoFails}");
+        }
+
+        static IEnumerable<int> BS9000Run()
+        {
+            Find.TickManager.CurTimeSpeed = TimeSpeed.Paused;
+            new Harmony("local.lp17.probe").Patch(AccessTools.Method(typeof(Messages), nameof(Messages.Message), new[] { typeof(Message), typeof(bool) }), prefix: new HarmonyMethod(typeof(Probe), nameof(TapMessagePre)));
+            HediffDef tap = HediffDef.Named("BS9000");
+            Expect(tap != null, "hediff def BS9000 is loaded");
+            if (tap == null) yield break;
+
+            Mark("pick colonist");
+            Pawn pawn = Find.CurrentMap.mapPawns.FreeColonistsSpawned.FirstOrDefault(x => !x.Dead && x.IsColonistPlayerControlled && !x.DevelopmentalStage.Baby() && x.health.CanBleed && BloodLoss(x) < 0.4f);
+            Expect(pawn != null, "a free colonist who can bleed to test on");
+            if (pawn == null) yield break;
+            Map map = pawn.MapHeld;
+            float loss = BloodLoss(pawn);
+            int packs = Packs(map);
+
+            Mark("research");
+            ResearchProjectDef proj = DefDatabase<ResearchProjectDef>.GetNamedSilentFail("BS9000");
+            Expect(proj != null, "research project BS9000 exists");
+            Expect(proj?.prerequisites != null && proj.prerequisites.Any(x => x.defName == "Bionics"), "research project BS9000 needs Bionics");
+            RecipeDef make = DefDatabase<RecipeDef>.GetNamedSilentFail("Make_Bloodsucker");
+            Expect(make != null && proj != null && make.researchPrerequisite == proj, "recipe Make_Bloodsucker needs research project BS9000");
+            // ThingDefOf has no FabricationBench field, so the bench is matched by name.
+            Expect(make?.recipeUsers != null && make.recipeUsers.Any(x => x.defName == "FabricationBench"), "recipe Make_Bloodsucker is made at the fabrication bench");
+            Expect(proj != null && proj.UnlockedDefs.OfType<ThingDef>().Any(x => x.defName == "Bloodsucker"), "research project BS9000 unlocks the hemogen tap");
+            yield return 1;
+
+            Mark("install");
+            pawn.health.AddHediff(tap, pawn.RaceProps.body.AllParts.First(x => x.def.defName == "Torso"));
+            BS9000.HediffComp_BS9000 comp = pawn.health.hediffSet.GetFirstHediffOfDef(tap)?.TryGetComp<BS9000.HediffComp_BS9000>();
+            Expect(comp != null, "implant is present and carries the tap comp");
+            if (comp == null) yield break;
+            yield return 1;
+
+            Mark("toggle");
+            // The base CompGetGizmos returns null, so a comp without the override reads as zero toggles.
+            List<Command_Toggle> toggles = (comp.CompGetGizmos() ?? Enumerable.Empty<Gizmo>()).OfType<Command_Toggle>().ToList();
+            Expect(toggles.Count == 1, "tap comp offers exactly one toggle");
+            if (toggles.Count == 0) yield break;
+            Command_Toggle toggle = toggles[0];
+            Expect(toggle.icon != null, "toggle has an icon");
+            Expect(ContentFinder<UnityEngine.Texture2D>.Get("UI/Icons/Medical/Bleeding", false) != null, "Core bleeding icon loads");
+            Expect(toggle.isActive(), "toggle starts on");
+            List<Command_Toggle> shown = new List<Command_Toggle>();
+            Guard("pawn gizmos", () => shown = pawn.GetGizmos().OfType<Command_Toggle>().ToList());
+            Expect(shown.Any(x => x.defaultLabel == toggle.defaultLabel), "pawn gizmos include the toggle");
+            toggle.toggleAction();
+            Expect(!toggle.isActive(), "toggle turns off");
+            tapMessage = null;
+            float none = 0f;
+            comp.CompPostTickInterval(ref none, 60000);
+            float lossOff = BloodLoss(pawn);
+            int packsOff = Packs(map);
+            Log.Message($"[PROBE] hemogen tap toggle: label '{toggle.defaultLabel}', {shown.Count} toggles on {pawn.LabelShort} (player controlled: {pawn.IsColonistPlayerControlled}), tick while off: packs {packs} -> {packsOff}, blood loss {loss:F3} -> {lossOff:F3}, message: {tapMessage}");
+            Expect(packsOff == packs && Math.Abs(lossOff - loss) < 0.0001f && tapMessage == null, "tick while off: no pack, no blood loss, no message");
+            toggle.toggleAction();
+            Expect(toggle.isActive(), "toggle turns back on");
+            yield return 1;
+
+            Mark("first tick");
+            comp.CompPostTickInterval(ref none, 60000);
+            float lossAfter = BloodLoss(pawn);
+            int packsAfter = Packs(map);
+            Log.Message($"[PROBE] hemogen tap on {pawn.LabelShort}: packs {packs} -> {packsAfter}, blood loss {loss:F3} -> {lossAfter:F3}, message: {tapMessage}");
+            Expect(packsAfter == packs + 1, "one pack dropped");
+            Expect(map.listerThings.ThingsOfDef(ThingDefOf.HemogenPack).Any(t => t.Position.InHorDistOf(pawn.PositionHeld, 3f)), "a pack lies within 3 cells of the pawn");
+            Expect(Math.Abs(lossAfter - 0.44f) < 0.01f, "blood loss capped at 0.44 after the tap");
+            Expect(tapMessage != null && tapMessage.IndexOf(pawn.LabelShort, StringComparison.OrdinalIgnoreCase) >= 0, "message names the pawn");
+            yield return 1;
+
+            Mark("second tick");
+            tapMessage = null;
+            comp.CompPostTickInterval(ref none, 60000);
+            Expect(Packs(map) == packsAfter, "second tick: no new pack");
+            Expect(Math.Abs(BloodLoss(pawn) - lossAfter) < 0.0001f, "second tick: blood loss unchanged");
+            BS9000.HediffComp_BS9000.Tap(pawn);
+            Expect(Packs(map) == packsAfter && Math.Abs(BloodLoss(pawn) - lossAfter) < 0.0001f && tapMessage == null, "direct Tap is skipped: no pack, no blood loss, no message");
+            yield return 1;
+
+            pawn.health.RemoveHediff(pawn.health.hediffSet.GetFirstHediffOfDef(tap));
+        }
+
+        // ---- Hemogen Tap promo scene ----
+
+        // Set once the scene hides the UI, so Frame() keeps closing the windows the game opens meanwhile, like the debug log on an error.
+        static bool filming;
+
+        static IEnumerable<int> Frames(int n)
+        {
+            for (int i = 0; i < n; i++) yield return 1;
+        }
+
+        // Waits until done() is true, at most n frames. The caller checks which of the two ended it.
+        static IEnumerable<int> WaitFor(Func<bool> done, int n)
+        {
+            for (int i = 0; i < n && !done(); i++) yield return 1;
+        }
+
+        static void Teleport(Pawn pawn, IntVec3 cell, Rot4? rot = null)
+        {
+            pawn.Position = cell;
+            pawn.Notify_Teleported(true, true);
+            if (rot.HasValue) pawn.Rotation = rot.Value;
+        }
+
+        static void Draft(Pawn pawn, bool on)
+        {
+            if (pawn.drafter != null) pawn.drafter.Drafted = on;
+        }
+
+        static bool Walk(Pawn pawn, IntVec3 cell) => pawn.jobs.TryTakeOrderedJob(JobMaker.MakeJob(JobDefOf.Goto, cell), JobTag.Misc);
+
+        static void HideUi()
+        {
+            filming = true;
+            AccessTools.Field(typeof(LudeonTK.EditWindow_Log), "canAutoOpen")?.SetValue(null, false); // else the next error opens the debug log over the shot
+            Find.UIRoot.screenshotMode.Active = true;
+            Find.WindowStack.TryRemove(typeof(LudeonTK.EditWindow_Log), false);
+            foreach (Window w in Find.WindowStack.Windows.ToList()) w.Close(false);
+            Find.Selector.ClearSelection();
+        }
+
+        // The stage is a cross of open ground, 20 cells up and down and 30 left and 12 right of c, with room for a bed 8 cells to the right.
+        static bool StageFits(Map map, IntVec3 c, bool strict)
+        {
+            bool Open(IntVec3 p) => p.InBounds(map) && p.Standable(map) && !p.Fogged(map) && (!strict || (!p.Roofed(map) && p.GetEdifice(map) == null));
+            for (int d = -20; d <= 20; d++) if (!Open(c + new IntVec3(0, 0, d))) return false;
+            for (int d = -30; d <= 12; d++) if (!Open(c + new IntVec3(d, 0, 0))) return false;
+            IntVec3 bed = c + new IntVec3(8, 0, 0);
+            return GenConstruct.CanPlaceBlueprintAt(ThingDefOf.Bed, bed, Rot4.South, map).Accepted
+                && (bed + IntVec3.North).Standable(map) && (bed + IntVec3.West).Standable(map) && (bed + IntVec3.East).Standable(map);
+        }
+
+        // Scans every second cell inside a 30-cell margin, which also keeps the whole cross on the map, and takes the fitting cell nearest to near.
+        static IntVec3 FindStage(Map map, IntVec3 near, bool strict)
+        {
+            IntVec3 best = IntVec3.Invalid;
+            int bestDist = int.MaxValue;
+            for (int x = 30; x < map.Size.x - 30; x += 2)
+                for (int z = 30; z < map.Size.z - 30; z += 2)
+                {
+                    IntVec3 c = new IntVec3(x, 0, z);
+                    int dist = (c - near).LengthHorizontalSquared;
+                    if (dist < bestDist && StageFits(map, c, strict)) { best = c; bestDist = dist; }
+                }
+            return best;
+        }
+
+        static IEnumerable<int> Bs9000Gif()
+        {
+            bool active = ModsConfig.IsActive("local.hemogen.tap");
+            Expect(active, "mod local.hemogen.tap is active");
+            // The mod's type is only named inside Bs9000GifRun, so an inactive mod ends the run with a FAIL instead of a step that throws.
+            if (active) foreach (int x in Bs9000GifRun()) yield return x;
+            Log.Message("[PROBE] bs9000gif failures: " + autoFails);
+        }
+
+        // Cut 1 zooms in on the host's face. Cut 2 has the host walk in, tap and walk out. Cut 3 has the doctor take the dropped pack to the patient in the bed.
+        // The recording script trims by the timestamps of the cut lines, so their text stays exactly as it is, and no wait throws: a timeout is a FAIL and the scene goes on.
+        static IEnumerable<int> Bs9000GifRun()
+        {
+            Find.TickManager.CurTimeSpeed = TimeSpeed.Paused;
+            Map map = Find.CurrentMap;
+
+            Mark("pick colonists");
+            List<Pawn> free = map.mapPawns.FreeColonistsSpawned.Where(c => !c.Dead && !c.Downed && c.DevelopmentalStage.Adult()).ToList();
+            Expect(free.Count >= 3, $"three free adult colonists for host, doctor and patient (found {free.Count})");
+            if (free.Count == 0) yield break;
+            Pawn host = free[0];
+            List<Pawn> others = free.Skip(1).ToList();
+            Pawn doctor = others.OrderByDescending(c => c.skills.GetSkill(SkillDefOf.Medicine).Level).FirstOrDefault() ?? host;
+            Pawn patient = others.FirstOrDefault(c => c != doctor) ?? host;
+            Log.Message($"[PROBE] host {host.LabelShort}, doctor {doctor.LabelShort}, patient {patient.LabelShort}");
+
+            Mark("stage cell");
+            IntVec3 near = new IntVec3((host.Position.x + doctor.Position.x + patient.Position.x) / 3, 0, (host.Position.z + doctor.Position.z + patient.Position.z) / 3);
+            IntVec3 stage = FindStage(map, near, true);
+            if (!stage.IsValid) stage = FindStage(map, near, false);
+            Expect(stage.IsValid, "a stage cell with a clear cross of open ground and room for a bed");
+            if (!stage.IsValid) yield break;
+            IntVec3 bedCell = stage + new IntVec3(8, 0, 0);
+            Log.Message($"[PROBE] stage cell {stage}, bed spot {bedCell}");
+
+            Mark("daylight and weather");
+            for (int i = 0; i < 24 && GenLocalDate.HourInteger(map) is < 11 or > 14; i++)
+                Find.TickManager.DebugSetTicksGame(Find.TickManager.TicksGame + 2500);
+            map.weatherManager.curWeather = WeatherDefOf.Clear;
+            map.weatherManager.lastWeather = WeatherDefOf.Clear;
+            map.weatherManager.curWeatherAge = 0; // the weather decider changes the weather once its age passes the planned duration
+
+            Mark("draft and park");
+            // Nobody else may wander into the shot or haul the pack. The doctor stays drafted, which keeps them where they are, until their order in cut 3:
+            // a Goto to their own cell ends at once and an undrafted colonist would go back to work.
+            foreach (Pawn p in map.mapPawns.FreeColonistsSpawned.ToList())
+                if (p != host && p != doctor && p != patient && !p.Downed) Draft(p, true);
+            Draft(host, true);
+            doctor.skills.GetSkill(SkillDefOf.Medicine).Level = 20;
+            Draft(doctor, true);
+            Teleport(doctor, stage + new IntVec3(-30, 0, 0));
+            // The patient gets up again unless some colonist other than the patient has doctoring switched on.
+            if (doctor.workSettings != null && doctor.workSettings.EverWork && !doctor.WorkTypeIsDisabled(WorkTypeDefOf.Doctor)) doctor.workSettings.SetPriority(WorkTypeDefOf.Doctor, 1);
+
+            Mark("bed and patient");
+            RecipeDef recipe = DefDatabase<RecipeDef>.GetNamedSilentFail("BloodTransfusion");
+            Expect(recipe != null, "recipe BloodTransfusion exists");
+            if (recipe == null) yield break;
+            Building_Bed bed = (Building_Bed)ThingMaker.MakeThing(ThingDefOf.Bed, ThingDefOf.WoodLog);
+            bed.SetFaction(Faction.OfPlayer);
+            GenSpawn.Spawn(bed, bedCell, map, Rot4.South);
+            bed.Medical = true;
+            Teleport(patient, bed.Position);
+            HealthUtility.AdjustSeverity(patient, HediffDefOf.BloodLoss, 0.5f - BloodLoss(patient));
+            Draft(patient, false);
+            // StartJob checks the medical bed at once. LayDown fails there unless a surgery is due and another awake colonist has doctoring on (set up above), so the bill goes in first.
+            Bill_Medical bill = new Bill_Medical(recipe, null);
+            patient.health.surgeryBills.AddBill(bill);
+            Job lieDown = JobMaker.MakeJob(JobDefOf.LayDown, bed);
+            lieDown.restUntilHealed = true;
+            patient.jobs.StartJob(lieDown, JobCondition.InterruptForced);
+
+            Mark("hide ui and settle");
+            HideUi();
+            Teleport(host, stage, Rot4.South);
+            Find.CameraDriver.config.sizeRange.min = 1.5f; // vanilla's minimum zoom of 11 puts the camera lower than the pawn layer at close sizes and pulls the zoom back out during the hold
+            // Cut 1's opening view is set before the cut1 start line is logged, so a frame grabbed just before that line already shows it.
+            Find.CameraDriver.JumpToCurrentMapLoc(host.DrawPos + new UnityEngine.Vector3(0f, 0f, 0.3f));
+            Find.CameraDriver.SetRootSize(20f);
+            Find.TickManager.CurTimeSpeed = TimeSpeed.Normal;
+            foreach (int x in Frames(90)) yield return x;
+            foreach (int x in WaitFor(() => patient.InBed(), 600)) yield return x; // only when a fast machine fitted fewer ticks into 90 frames
+            Find.TickManager.CurTimeSpeed = TimeSpeed.Paused;
+            Expect(patient.InBed(), "patient lies in the bed");
+            Draft(host, false); // paused, so the host stays put; undrafted they hold no weapon in the face shot
+
+            Mark("cut 1");
+            Log.Message("[PROBE] cut1 start");
+            for (int i = 0; i < 240; i++)
+            {
+                Find.CameraDriver.JumpToCurrentMapLoc(host.DrawPos + new UnityEngine.Vector3(0f, 0f, 0.3f));
+                Find.CameraDriver.SetRootSize(UnityEngine.Mathf.Lerp(20f, 2.2f, UnityEngine.Mathf.SmoothStep(0f, 1f, i / 239f)));
+                yield return 1;
+            }
+            foreach (int x in Frames(45)) yield return x;
+            Log.Message("[PROBE] cut1 end");
+
+            Mark("cut 2");
+            Find.CameraDriver.JumpToCurrentMapLoc(stage);
+            Find.CameraDriver.SetRootSize(9f);
+            Teleport(host, stage + new IntVec3(0, 0, -20), Rot4.North);
+            Draft(host, true);
+            Find.TickManager.CurTimeSpeed = TimeSpeed.Normal;
+            Log.Message("[PROBE] cut2 start");
+            Expect(Walk(host, stage), "host takes the order to walk to the stage cell");
+            foreach (int x in WaitFor(() => host.Position == stage, 900)) yield return x;
+            Expect(host.Position == stage, "host reaches the stage cell");
+            Mark("tap");
+            Guard("tap", () => BS9000.HediffComp_BS9000.Tap(host));
+            foreach (int x in Frames(45)) yield return x;
+            Mark("walk out");
+            Walk(host, stage + new IntVec3(0, 0, 20));
+            foreach (int x in WaitFor(() => host.Position.z >= stage.z + 18, 900)) yield return x;
+            Expect(host.Position.z >= stage.z + 18, "host walks out past the top edge");
+            Log.Message("[PROBE] cut2 end");
+
+            Mark("cut 3");
+            Log.Message("[PROBE] cut3 start");
+            Thing pack = map.listerThings.ThingsOfDef(ThingDefOf.HemogenPack).Where(t => t.Position.InHorDistOf(stage, 4f)).OrderBy(t => t.Position.DistanceToSquared(stage)).FirstOrDefault();
+            Expect(pack != null, "a hemogen pack lies within 4 cells of the stage cell");
+            if (pack == null)
+            {
+                pack = GenSpawn.Spawn(ThingMaker.MakeThing(ThingDefOf.HemogenPack), stage, map);
+                Log.Message("[PROBE] no pack from the tap, spawned one at the stage cell");
+            }
+            // The job vanilla gives a doctor for a surgery bill, see WorkGiver_DoBill.TryStartNewDoBillJob.
+            Job transfuse = JobMaker.MakeJob(JobDefOf.DoBill, patient);
+            transfuse.targetQueueB = new List<LocalTargetInfo> { pack };
+            transfuse.countQueue = new List<int> { 1 };
+            transfuse.haulMode = HaulMode.ToCellNonStorage;
+            transfuse.bill = bill;
+            Draft(doctor, false);
+            IntVec3 packCell = pack.Position;
+            Expect(doctor.jobs.TryTakeOrderedJob(transfuse, JobTag.Misc), "doctor takes the transfusion order");
+            // The long walks run at Fast; the pickup and the arrival at the bed at Normal.
+            for (int i = 0; i < 1200 && !doctor.Position.InHorDistOf(bedCell, 2f); i++)
+            {
+                bool far = !doctor.Position.InHorDistOf(packCell, 6f) && !doctor.Position.InHorDistOf(bedCell, 6f);
+                Find.TickManager.CurTimeSpeed = far ? TimeSpeed.Fast : TimeSpeed.Normal;
+                yield return 1;
+            }
+            Expect(doctor.Position.InHorDistOf(bedCell, 2f), "doctor reaches the bed");
+            Find.TickManager.CurTimeSpeed = TimeSpeed.Fast;
+            foreach (int x in WaitFor(() => BloodLoss(patient) < 0.3f || !patient.health.surgeryBills.Bills.Contains(bill), 1800)) yield return x;
+            Expect(BloodLoss(patient) < 0.3f, $"blood loss dropped below 0.3 (now {BloodLoss(patient):F2})");
+            Find.TickManager.CurTimeSpeed = TimeSpeed.Normal;
+            foreach (int x in Frames(45)) yield return x;
+            Log.Message("[PROBE] cut3 end");
         }
 
         static IEnumerable<int> Gear()

@@ -21,6 +21,7 @@
     <Reference Include="System.Runtime.Extensions"><HintPath>$(RWDir)\System.Runtime.Extensions.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="YART"><HintPath>$(RWDir)\Mods\02-ui__seohyeon.yart\1.7\Assemblies\YART.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="YartQol"><HintPath>$(RWDir)\Mods\02-ui__local.yart.qol\1.7\Assemblies\YartQol.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="BS9000"><HintPath>$(RWDir)\Mods\09-medical__local.hemogen.tap\1.7\Assemblies\BS9000.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
   <ItemGroup>
     <Reference Include="System.Private.CoreLib"><HintPath>$(RWDir)\System.Private.CoreLib.dll</HintPath><Private>false</Private></Reference>

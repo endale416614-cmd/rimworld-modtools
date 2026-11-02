@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LanguageData>
+  <BS9000_Tapped>{PAWN_labelShort} dropped a hemogen pack.</BS9000_Tapped>
+  <BS9000_Toggle>Bloodsucker 9000</BS9000_Toggle>
+  <BS9000_ToggleDesc>When on, the Bloodsucker 9000 draws one hemogen pack a day from this pawn.</BS9000_ToggleDesc>
+</LanguageData>

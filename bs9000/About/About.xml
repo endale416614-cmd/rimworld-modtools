@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ModMetaData>
+  <name>Bloodsucker 9000</name>
+  <authors>
+    <li>Faeris</li>
+    <li>Adrawerer</li>
+  </authors>
+  <packageId>local.hemogen.tap</packageId>
+  <modVersion>1.1.0</modVersion>
+  <supportedVersions>
+    <li>1.6</li>
+    <li>1.7</li>
+  </supportedVersions>
+  <description>A butt implant that bleeds its host into one hemogen pack a day. The host was not consulted.
+
+Research Bloodsucker 9000 after Bionics, craft it at a fabrication bench, install it by surgery. A toggle on the pawn's command bar turns it off and on.
+
+While installed: +15% pain, movement 70%. Each tap: bite sound, blood splash, a -15 mood for a day (+15 for masochists). Blood loss stays below the severe stage, so the implant cannot kill by itself.
+
+Requires Biotech. No Harmony. Safe to add to an existing save; remove the implants by surgery before removing the mod.</description>
+  <modDependencies>
+    <li>
+      <packageId>Ludeon.RimWorld.Biotech</packageId>
+      <displayName>Biotech</displayName>
+    </li>
+  </modDependencies>
+  <loadAfter>
+    <li>Ludeon.RimWorld.Biotech</li>
+  </loadAfter>
+</ModMetaData>
