@@ -17,6 +17,8 @@
 //   select : load LP17_PROBE_SAVE, send double clicks through the engine's input path on furniture, walls, blueprints, animals and colonists, report what got selected and which
 //            commands the gizmo grid drew and click one, check short hashes, an egg hatching after its parent was discarded and quest drop spots, repeat with the fixes off as a
 //            control, then make a temporary save (deleted right after).
+//   conflicts : load LP17_PROBE_SAVE, check the mod conflict fixes (nutrient paste dispenser toils, gear row hiding, flare shield and Genetron, turret cast source),
+//            then unpatch them and repeat as a control that must show the opposite. It changes settings and spawns things in memory only, undoes them, and saves nothing.
 // Every mode also writes exceptions that were thrown, caught or not, to LP17_PROBE_OUT.exceptions.tsv.
 // Every line starts with [PROBE so harness/proberun.ps1 can attribute errors to the step before them.
 using System;
@@ -43,9 +45,14 @@ namespace LP17Hotfix
         static Probe()
         {
             if (string.IsNullOrEmpty(mode)) return;
+            LongEventHandler.ExecuteWhenFinished(() =>
+            {
+                string fail = CompressedThingsByName.SelfTest();
+                Log.Message(fail == null ? "[PROBE] ok compressed-things-by-name self-test" : "[PROBE] FAIL compressed-things-by-name self-test: " + fail);
+            });
             AppDomain.CurrentDomain.FirstChanceException += (s, e) => CountException(e.Exception);
             if (mode == "static" || mode == "dump") new Harmony("local.lp17.probe").Patch(AccessTools.Method(typeof(Root_Entry), "Update"), postfix: new HarmonyMethod(typeof(Probe), nameof(MenuFrame)));
-            else if (mode == "soak" || mode == "gear" || mode == "scan" || mode == "autoresearch" || mode == "hemogentap" || mode == "bs9000gif" || mode == "newgame" || mode == "select")
+            else if (mode == "soak" || mode == "gear" || mode == "scan" || mode == "autoresearch" || mode == "hemogentap" || mode == "bs9000gif" || mode == "newgame" || mode == "select" || mode == "conflicts")
             {
                 Harmony h = new Harmony("local.lp17.probe");
                 h.Patch(AccessTools.Method(typeof(Autosaver), "AutosaverTick"), prefix: new HarmonyMethod(typeof(Probe), nameof(No)));
@@ -361,7 +368,7 @@ namespace LP17Hotfix
             Log.ResetMessageCount();
             foreach (Window w in Find.WindowStack.Windows.ToList())
                 if (w.forcePause || w is Dialog_MessageBox || filming) w.Close(false);
-            if (run == null) { Log.Message("[PROBE] playing"); run = (mode == "gear" ? Gear() : mode == "scan" ? Scan() : mode == "autoresearch" ? AutoResearchTest() : mode == "hemogentap" ? BS9000Test() : mode == "bs9000gif" ? Bs9000Gif() : mode == "newgame" ? NewGameTest() : mode == "select" ? SelectTest() : Soak()).GetEnumerator(); }
+            if (run == null) { Log.Message("[PROBE] playing"); run = (mode == "gear" ? Gear() : mode == "scan" ? Scan() : mode == "autoresearch" ? AutoResearchTest() : mode == "hemogentap" ? BS9000Test() : mode == "bs9000gif" ? Bs9000Gif() : mode == "newgame" ? NewGameTest() : mode == "select" ? SelectTest() : mode == "conflicts" ? ConflictsTest() : Soak()).GetEnumerator(); }
             Stopwatch sw = Stopwatch.StartNew();
             try
             {
@@ -658,6 +665,207 @@ namespace LP17Hotfix
             Log.Message($"[PROBE] control end: history added={history.Count - before} (want 1)");
         }
 
+        // ---- mod conflict fixes: each check runs with the fixes on, then again with them unpatched, where the opposite must hold ----
+
+        static int conflictChecks, conflictSkips;
+
+        static void CheckC(bool ok, string what) { conflictChecks++; Expect(ok, what); }
+
+        static void SkipC(string name, string why) { conflictSkips++; Log.Message($"[PROBE] skip {name}: {why}"); }
+
+        static IEnumerable<MethodBase> ConflictTargets()
+        {
+            yield return AccessTools.Method(typeof(JobDriver_Ingest), "PrepareToIngestToils_Dispenser");
+            yield return AccessTools.Method(typeof(ITab_Pawn_Gear), "DrawThingRow");
+            yield return AccessTools.Method("VanillaQuestsExpandedTheGenerator.VanillaQuestsExpandedTheGenerator_PowerNet_PowerNetTick_Patch:PowerBatteries");
+            yield return AccessTools.Method(typeof(Verb_LaunchProjectile), "TryCastShot");
+            yield return AccessTools.Method(typeof(GenDraw), nameof(GenDraw.DrawAimPie));
+        }
+
+        static IEnumerable<int> ConflictsTest()
+        {
+            Find.TickManager.CurTimeSpeed = TimeSpeed.Paused;
+            Map map = Find.AnyPlayerHomeMap;
+            Current.Game.CurrentMap = map;
+            foreach (int f in ConflictsPass("fixed", map)) yield return f;
+
+            Harmony hot = new Harmony(Lp.Id);
+            foreach (MethodBase m in ConflictTargets().Where(m => m != null).ToList()) hot.Unpatch(m, HarmonyPatchType.All, Lp.Id);
+            foreach (int f in ConflictsPass("control", map)) yield return f;
+            Log.Message($"[PROBE] conflicts failures: {autoFails}, checks {conflictChecks}, skips {conflictSkips}");
+        }
+
+        static int DispenserToils(MethodInfo method, Pawn pawn)
+        {
+            try { return ((IEnumerable<Toil>)method.Invoke(new JobDriver_Ingest { pawn = pawn }, null)).ToList().Count; }
+            catch (Exception e) { Log.Message($"[PROBE] dispenser toils threw for {pawn}: {First((e.InnerException ?? e).Message)}"); return -1; }
+        }
+
+        static IEnumerable<PatchInfoRow> PatchRows(MethodBase method, bool prefixes)
+        {
+            Patches info = Harmony.GetPatchInfo(method);
+            return info == null ? new List<PatchInfoRow>() : (prefixes ? info.Prefixes : info.Transpilers).Select(p => new PatchInfoRow { owner = p.owner, priority = p.priority });
+        }
+
+        struct PatchInfoRow { public string owner; public int priority; }
+
+        static Thing SpawnAtFreeCell(Map map, ThingDef d)
+        {
+            if (!CellFinderLoose.TryGetRandomCellWith(c => c.Standable(map) && c.GetFirstBuilding(map) == null && GenAdj.OccupiedRect(c, Rot4.North, d.size).InBounds(map), map, 200, out IntVec3 cell)) return null;
+            Thing t = ThingMaker.MakeThing(d, d.MadeFromStuff ? GenStuff.DefaultStuffFor(d) : null);
+            if (t.def.CanHaveFaction && d.category == ThingCategory.Building) t.SetFactionDirect(Faction.OfPlayer);
+            return GenSpawn.Spawn(t, cell, map, WipeMode.Vanish);
+        }
+
+        static bool RtShieldActive(Map map, Type compType)
+        {
+            MethodInfo coordinator = null;
+            try { coordinator = compType.Assembly.GetTypes().SelectMany(t => t.GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)).FirstOrDefault(m => m.Name == "GetShieldCoordinator"); }
+            catch (ReflectionTypeLoadException) { }
+            object coord = coordinator?.Invoke(null, new object[] { map });
+            MethodInfo active = coord == null ? null : AccessTools.Method(coord.GetType(), "HasActiveShield");
+            if (active == null) throw new InvalidOperationException("RT's shield coordinator not found");
+            return (bool)active.Invoke(coord, null);
+        }
+
+        static IEnumerable<int> ConflictsPass(string pass, Map map)
+        {
+            bool fix = pass == "fixed";
+            string tag = fix ? "" : "control ";
+            Log.Message($"[PROBE] conflicts {pass} start");
+            Pawn colonist = map.mapPawns.FreeColonistsSpawned.FirstOrDefault();
+
+            // 1. dispenser
+            Type commonSense = AccessTools.TypeByName("CommonSense.Settings");
+            FieldInfo advIngest = commonSense == null ? null : AccessTools.Field(commonSense, "adv_cleaning_ingest");
+            MethodInfo dispenser = AccessTools.Method(typeof(JobDriver_Ingest), "PrepareToIngestToils_Dispenser");
+            Pawn animal = map.mapPawns.SpawnedColonyAnimals.FirstOrDefault();
+            if (advIngest == null || dispenser == null || animal == null || colonist == null) SkipC("dispenser", "Common Sense setting, the dispenser method, an animal or a colonist is missing");
+            else
+            {
+                bool old = (bool)advIngest.GetValue(null);
+                advIngest.SetValue(null, true);
+                try
+                {
+                    int animalToils = DispenserToils(dispenser, animal), colonistToils = DispenserToils(dispenser, colonist);
+                    CheckC(fix ? animalToils == 3 : animalToils != 3, $"{tag}dispenser: animal gets {animalToils} toils{(fix ? "" : " (not 3)")}");
+                    CheckC(colonistToils > 3, $"{tag}dispenser: colonist gets {colonistToils} toils (more than 3)");
+                }
+                finally { advIngest.SetValue(null, old); }
+            }
+            yield return 1;
+
+            // 2. gear row
+            ThingDef lantern = DefDatabase<ThingDef>.AllDefs.FirstOrDefault(d => d.thingClass != null && d.thingClass.FullName == "LanternMod.Apparel_Lantern");
+            MethodInfo gearRow = AccessTools.Method(typeof(ITab_Pawn_Gear), "DrawThingRow");
+            if (lantern == null || colonist == null || gearRow == null) SkipC("gear row", "Belt Lantern def, a colonist or the gear row method is missing");
+            else
+            {
+                Apparel worn = (Apparel)ThingMaker.MakeThing(lantern, lantern.MadeFromStuff ? GenStuff.DefaultStuffFor(lantern) : null);
+                try
+                {
+                    colonist.apparel.Wear(worn, false);
+                    Apparel other = colonist.apparel.WornApparel.FirstOrDefault(a => a != worn);
+                    if (!colonist.apparel.WornApparel.Contains(worn)) SkipC("gear row", "colonist could not wear the lantern");
+                    else if (fix)
+                    {
+                        CheckC(!GearRowHiddenFirst.Prefix(worn), "gear row: the hiding prefix hides the lantern row");
+                        if (other == null) SkipC("gear row shows other", "colonist wears nothing else");
+                        else CheckC(GearRowHiddenFirst.Prefix(other), "gear row: another worn apparel row still shows");
+                        List<PatchInfoRow> rows = PatchRows(gearRow, true).OrderByDescending(r => r.priority).ToList();
+                        CheckC(rows.Count > 0 && rows[0].owner == Lp.Id, $"gear row: this mod's prefix runs first (first owner {(rows.Count > 0 ? rows[0].owner : "none")})");
+                    }
+                    else CheckC(!PatchRows(gearRow, true).Any(r => r.owner == Lp.Id), "control gear row: no prefix of this mod on DrawThingRow");
+                }
+                finally
+                {
+                    if (colonist.apparel.WornApparel.Contains(worn)) colonist.apparel.Remove(worn);
+                    if (!worn.Destroyed) worn.Destroy();
+                }
+            }
+            yield return 1;
+
+            // 3. flare shield
+            MethodInfo powerBatteries = AccessTools.Method("VanillaQuestsExpandedTheGenerator.VanillaQuestsExpandedTheGenerator_PowerNet_PowerNetTick_Patch:PowerBatteries");
+            PowerNet net = map.powerNetManager.AllNetsListForReading.FirstOrDefault();
+            ThingDef shieldDef = DefDatabase<ThingDef>.AllDefs.FirstOrDefault(d => d.comps != null && d.comps.Any(c => c.compClass != null && c.compClass.Name == "CompRTSolarFlareShield"));
+            if (powerBatteries == null || net == null || shieldDef == null) SkipC("flare shield", "VQE The Generator battery method, a power net or the RT shield def is missing");
+            else
+            {
+                if (fix) CheckC(!FlareShieldGenetron.Batteries(net), "flare shield: no flare, battery path off");
+                GameCondition flare = GameConditionMaker.MakeCondition(DefDatabase<GameConditionDef>.GetNamed("SolarFlare"), 60000);
+                map.gameConditionManager.RegisterCondition(flare);
+                Thing shield = null;
+                try
+                {
+                    CheckC(map.gameConditionManager.ElectricityDisabled(map), $"{tag}flare shield: a solar flare disables electricity");
+                    Type compType = shieldDef.comps.First(c => c.compClass != null && c.compClass.Name == "CompRTSolarFlareShield").compClass;
+                    bool already = false;
+                    try { already = RtShieldActive(map, compType); }
+                    catch (Exception e) { SkipC("flare shield, no shield", First(e.Message)); already = true; }
+                    if (already) SkipC("flare shield, no shield", "a shield is already active or cannot be read");
+                    else if (fix) CheckC(FlareShieldGenetron.Batteries(net), "flare shield: flare, no shield, battery path on");
+
+                    shield = SpawnAtFreeCell(map, shieldDef);
+                    if (shield == null) SkipC("flare shield, shield active", "no free cell for the shield");
+                    else
+                    {
+                        CompPowerTrader power = shield.TryGetComp<CompPowerTrader>();
+                        if (power != null) power.PowerOn = true;
+                        foreach (int x in Ticks(2)) yield return x;
+                        if (power != null) power.PowerOn = true; // a net tick may have switched it off
+                        bool active = false;
+                        try { active = RtShieldActive(map, compType); }
+                        catch (Exception) { }
+                        if (!active) SkipC("flare shield, shield active", "RT does not count the spawned shield as active");
+                        else if (fix) CheckC(!FlareShieldGenetron.Batteries(net), "flare shield: flare under a shield, battery path off");
+                    }
+                    // The control pass does not call Batteries: it is this mod's own method and answers the same either way.
+                    bool hooked = PatchRows(powerBatteries, true).Any(r => r.owner == Lp.Id);
+                    CheckC(fix ? hooked : !hooked, $"{tag}flare shield: this mod's prefix on PowerBatteries is {(fix ? "present" : "gone")}");
+                }
+                finally
+                {
+                    if (shield != null && !shield.Destroyed) shield.Destroy();
+                    flare.End();
+                }
+            }
+            yield return 1;
+
+            // 4. cast source
+            Type barrels = AccessTools.TypeByName("VFED.Building_TurretGunBarrels"), gravship = AccessTools.TypeByName("VanillaGravshipExpanded.Building_GravshipTurret");
+            MethodInfo gravshipSource = gravship == null ? null : AccessTools.Method(gravship, "GetCastSource");
+            MethodInfo tryCast = AccessTools.Method(typeof(Verb_LaunchProjectile), "TryCastShot"), aimPie = AccessTools.Method(typeof(GenDraw), nameof(GenDraw.DrawAimPie));
+            if (barrels == null || gravshipSource == null) SkipC("cast source", "VFE Deserters or Vanilla Gravship Expanded is missing");
+            else
+            {
+                bool patched = PatchRows(aimPie, false).Any(r => r.owner == Lp.Id) && PatchRows(tryCast, false).Any(r => r.owner == Lp.Id);
+                CheckC(fix ? patched : !PatchRows(aimPie, false).Any(r => r.owner == Lp.Id) && !PatchRows(tryCast, false).Any(r => r.owner == Lp.Id), $"{tag}cast source: this mod's transpiler on DrawAimPie and TryCastShot is {(fix ? "present" : "gone")}");
+                if (fix)
+                {
+                    bool checkedOne = false;
+                    foreach (ThingDef d in DefDatabase<ThingDef>.AllDefs.Where(d => d.category == ThingCategory.Building && d.thingClass != null && gravship.IsAssignableFrom(d.thingClass)).ToList())
+                    {
+                        Thing turret = null;
+                        try
+                        {
+                            turret = SpawnAtFreeCell(map, d);
+                            if (turret == null) continue;
+                            UnityEngine.Vector3 theirs = (UnityEngine.Vector3)gravshipSource.Invoke(null, new object[] { turret }), ours = CastSourceChain.Either(turret), draw = turret.DrawPos;
+                            bool differs = (theirs - draw).sqrMagnitude > 1e-6f;
+                            if (!differs) continue;
+                            CheckC((ours - theirs).sqrMagnitude < 1e-6f, $"cast source: {d.defName} chain gives {ours}, gravship helper {theirs}, DrawPos {draw}, cast source differs from DrawPos: {differs}");
+                            checkedOne = true;
+                            break;
+                        }
+                        finally { if (turret != null && !turret.Destroyed) turret.Destroy(); }
+                    }
+                    if (!checkedOne) SkipC("cast source, chain value", "no gravship turret def has a cast source different from its DrawPos");
+                }
+            }
+            yield return 1;
+        }
+
         static void Guard(string what, Action a)
         {
             try { a(); }
@@ -860,6 +1068,12 @@ namespace LP17Hotfix
                 GameDataSaveLoader.SaveGame("LP17ProbeTemp");
                 string path = GenFilePaths.FilePathForSavedGame("LP17ProbeTemp");
                 Log.Message($"[PROBE] save took {save.ElapsedMilliseconds} ms, {new FileInfo(path).Length / (1024 * 1024)} MB");
+                // compressed-things-by-name: the save must name its compressed defs, and the loaded map must hold the ore the old save named.
+                string text = File.ReadAllText(path);
+                int at = text.IndexOf("<lp17CompressedThingDefs>", StringComparison.Ordinal);
+                int end = at < 0 ? -1 : text.IndexOf("</lp17CompressedThingDefs>", at, StringComparison.Ordinal);
+                Log.Message(end < 0 ? "[PROBE] FAIL save has no compressed thing names" : "[PROBE] ok save names compressed things: " + string.Join(" ", text.Substring(at, end - at).Split(new[] { '\r', '\n', '\t', ' ' }, StringSplitOptions.RemoveEmptyEntries)));
+                Log.Message("[PROBE] silver ore cells on map: " + Find.CurrentMap.listerThings.ThingsOfDef(DefDatabase<ThingDef>.GetNamed("MineableSilver")).Count);
                 File.Delete(path);
             });
             yield return 1;

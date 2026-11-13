@@ -1,7 +1,7 @@
 # Runs the test-only probe build of LP17 Hotfix (probe\Probe.cs): swaps the DLL in, turns dev mode on, launches,
 # waits for "[PROBE] done", kills the game, then restores the DLL and Prefs.xml. Saves nothing to the save folder.
 param(
-    [Parameter(Mandatory)][ValidateSet('static', 'soak', 'dump', 'gear', 'scan', 'autoresearch', 'hemogentap', 'bs9000gif', 'newgame', 'select')][string]$Mode,
+    [Parameter(Mandatory)][ValidateSet('static', 'soak', 'dump', 'gear', 'scan', 'autoresearch', 'hemogentap', 'bs9000gif', 'newgame', 'select', 'conflicts')][string]$Mode,
     [string]$Save = '',
     [Parameter(Mandatory)][string]$OutLog,
     [string]$OutTable = '',

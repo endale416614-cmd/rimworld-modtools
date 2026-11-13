@@ -34,6 +34,7 @@ namespace LP17Hotfix
             DefOfWrongType.Apply(); // before the game binds DefOfs
             VanillaFemaleBody.Apply(); // queued behind each mod's content load, before anything can cache the body graphic
             AllsparkShortHashes.Apply(); // before Allspark Crisis generates its defs at startup, which comes before this mod's own startup hook
+            BulletSoundsMeleeContext.Apply(); // before Bullet Sounds patches in the startup pass
         }
     }
 
@@ -65,6 +66,8 @@ namespace LP17Hotfix
             ColonyGroupUniqueId.Apply();
             SpacerShieldsDebugLine.Apply();
             LayerConnectionPostLoad.Apply();
+            ClosestTileOffsetLayer.Apply();
+            ReleaseDestroyedUnreserved.Apply();
             IsekaiTileNotices.Apply();
             VefHeavyWeaponUnspawned.Apply();
             ApparelSetWearRules.Apply();
@@ -83,6 +86,12 @@ namespace LP17Hotfix
             QuestDropSpotOnLand.Apply();
             IsekaiDungeonNotice.Apply();
             DoubleClickWindow.Apply();
+            CompressedThingsByName.Apply();
+            VeeSpaceBattleCell.Apply();
+            FlareShieldGenetron.Apply();
+            DispenserAnimalToils.Apply();
+            GearRowHiddenFirst.Apply();
+            CastSourceChain.Apply();
         }
     }
 
@@ -733,6 +742,52 @@ namespace LP17Hotfix
         }
     }
 
+    static class ClosestTileOffsetLayer
+    {
+        // The closest-tile query keeps only tiles in the origin tile's reachability field, so from the surface no tile of
+        // an off-centre layer (Desolate Moon's moon, origin 50,0,-200) qualifies. Gravship targeting then measures every
+        // moon tile as unreachable and rejects it as beyond range. Fall back to the nearest tile by position.
+        internal static void Apply() => Lp.Run("closest-tile-offset-layer", () =>
+        {
+            new Harmony(Lp.Id).Patch(AccessTools.Method(typeof(PlanetLayer), nameof(PlanetLayer.GetClosestTile_NewTemp)), postfix: new HarmonyMethod(typeof(ClosestTileOffsetLayer), nameof(Postfix)));
+            return null;
+        });
+
+        static void Postfix(PlanetLayer __instance, PlanetTile other, ref PlanetTile __result)
+        {
+            if (__result.Valid || !other.Valid || other.Layer == __instance || __instance.TilesCount == 0) return;
+            Vector3 from = other.Layer.GetTileCenter(other.tileId);
+            int best = 0;
+            float bestDist = float.MaxValue;
+            for (int i = 0; i < __instance.TilesCount; i++)
+            {
+                float d = (__instance.GetTileCenter(i) - from).sqrMagnitude;
+                if (d < bestDist) { bestDist = d; best = i; }
+            }
+            __result = new PlanetTile(best, __instance);
+        }
+    }
+
+    static class ReleaseDestroyedUnreserved
+    {
+        // Releasing a destroyed thing that holds no matching reservation still reaches the "remove" branch and passes a null
+        // reservation to MapEvents.Notify_ReservationRemoved, which throws. Build From Inventory's drop toil releases wood
+        // that a frame or the generator already used up, so each such haul logged a warning and an exception.
+        internal static void Apply() => Lp.Run("release-destroyed-unreserved", () =>
+        {
+            new Harmony(Lp.Id).Patch(AccessTools.Method(typeof(Verse.AI.ReservationManager), nameof(Verse.AI.ReservationManager.Release)), prefix: new HarmonyMethod(typeof(ReleaseDestroyedUnreserved), nameof(Prefix)) { priority = Priority.First });
+            return null;
+        });
+
+        static bool Prefix(LocalTargetInfo target, Pawn claimant, Verse.AI.Job job, List<Verse.AI.ReservationManager.Reservation> ___reservations)
+        {
+            if (!target.ThingDestroyed) return true;
+            foreach (var r in ___reservations)
+                if (r.Target == target && r.Claimant == claimant && r.Job == job) return true;
+            return false;
+        }
+    }
+
     static class LayerConnectionPostLoad
     {
         // Two scenario layers can hold equal connections (same tag, cost, zoom), and the post-load set rejects the
@@ -744,6 +799,343 @@ namespace LP17Hotfix
         });
 
         static bool Prefix(IExposable s) => !(s is RimWorld.LayerConnection);
+    }
+
+    static class CompressedThingsByName
+    {
+        // Rock, ore and other compressed things are saved as one short hash per map cell and nothing else. The game derives the
+        // hash from the def name and steps past values already taken, in name order, so a mod that adds one def can move another
+        // def to the next value. A map saved before that then names the wrong def: this colony's 50 silver ore cells (21442)
+        // pointed at a door frame def and were dropped on load. Save the def name of every value in use next to the map data and
+        // move the data to the current values on load. A save from before this fix has no names; there a value that now belongs
+        // to a non-compressible def goes to the one compressible def whose own hash sits at or just below it and which now sits above it.
+        const string Label = "lp17CompressedThingDefs";
+        const int GuessWindow = 8;
+        static readonly MethodInfo RenamedDef = AccessTools.Method(typeof(BackCompatibility), "BackCompatibleDefName"); // by reflection: its XmlNode parameter type is not referenced
+        static readonly AccessTools.FieldRef<MapFileCompressor, byte[]> Data = AccessTools.FieldRefAccess<MapFileCompressor, byte[]>("compressedData");
+
+        internal static void Apply() => Lp.Run("compressed-things-by-name", () =>
+        {
+            new Harmony(Lp.Id).Patch(AccessTools.Method(typeof(MapFileCompressor), nameof(MapFileCompressor.ExposeData)), postfix: new HarmonyMethod(typeof(CompressedThingsByName), nameof(Postfix)));
+            return null;
+        });
+
+        static void Postfix(MapFileCompressor __instance)
+        {
+            try
+            {
+                if (Scribe.mode == LoadSaveMode.Saving)
+                {
+                    List<string> names = NamesIn(Data(__instance), ByHash());
+                    Scribe_Collections.Look(ref names, Label, LookMode.Value);
+                }
+                else if (Scribe.mode == LoadSaveMode.LoadingVars)
+                {
+                    List<string> names = null;
+                    Scribe_Collections.Look(ref names, Label, LookMode.Value);
+                    byte[] data = Data(__instance);
+                    if (data == null) return;
+                    Dictionary<ushort, ThingDef> byHash = ByHash();
+                    Dictionary<ushort, ushort> moves = names != null ? MovesFromNames(names) : MovesByGuess(data, byHash);
+                    int cells = Translate(data, moves);
+                    if (cells > 0) Log.Message("[LP17 Hotfix] compressed-things-by-name: moved " + cells + " cells to current short hashes (" + Describe(moves, byHash) + (names != null ? ")" : "; no names in this save, matched by def name hash)"));
+                }
+            }
+            catch (Exception e)
+            {
+                // Without this fix the game saves and loads as it always did; an error here must not cost the save.
+                Log.Error("[LP17 Hotfix] compressed-things-by-name failed, map data left as the game wrote it: " + e);
+            }
+        }
+
+        // The game's loader resolves a value the same way: the first def in database order wins. DefDatabase's own lookup
+        // table is built once at startup and misses defs that mods add later, such as Replace Stuff's frames.
+        static Dictionary<ushort, ThingDef> ByHash()
+        {
+            Dictionary<ushort, ThingDef> byHash = new Dictionary<ushort, ThingDef>();
+            foreach (ThingDef def in DefDatabase<ThingDef>.AllDefsListForReading)
+                if (def.shortHash != 0 && !byHash.ContainsKey(def.shortHash)) byHash.Add(def.shortHash, def);
+            return byHash;
+        }
+
+        internal static List<string> NamesIn(byte[] data, Dictionary<ushort, ThingDef> byHash)
+        {
+            List<string> names = new List<string>();
+            if (data == null) return names;
+            HashSet<ushort> seen = new HashSet<ushort>();
+            for (int i = 0; i + 1 < data.Length; i += 2)
+            {
+                ushort value = (ushort)(data[i] | (data[i + 1] << 8));
+                if (value == 0 || !seen.Add(value)) continue;
+                if (byHash.TryGetValue(value, out ThingDef def)) names.Add(value + "=" + def.defName);
+            }
+            return names;
+        }
+
+        internal static Dictionary<ushort, ushort> MovesFromNames(List<string> names)
+        {
+            Dictionary<ushort, ushort> moves = new Dictionary<ushort, ushort>();
+            foreach (string entry in names)
+            {
+                int cut = entry == null ? -1 : entry.IndexOf('=');
+                if (cut <= 0 || !ushort.TryParse(entry.Substring(0, cut), out ushort saved)) continue;
+                string name = entry.Substring(cut + 1);
+                ThingDef def = Named(name);
+                if (def != null && def.shortHash != 0 && def.shortHash != saved) moves[saved] = def.shortHash;
+            }
+            return moves;
+        }
+
+        static ThingDef Named(string name)
+        {
+            ThingDef def = DefDatabase<ThingDef>.GetNamedSilentFail(name);
+            if (def != null || RenamedDef == null) return def;
+            string renamed = RenamedDef.Invoke(null, new object[] { typeof(ThingDef), name, false, null }) as string; // renamed since the save
+            return renamed == null || renamed == name ? null : DefDatabase<ThingDef>.GetNamedSilentFail(renamed);
+        }
+
+        static Dictionary<ushort, ushort> MovesByGuess(byte[] data, Dictionary<ushort, ThingDef> byHash)
+        {
+            Dictionary<ushort, ushort> moves = new Dictionary<ushort, ushort>();
+            List<ThingDef> compressible = null;
+            HashSet<ushort> seen = new HashSet<ushort>();
+            for (int i = 0; i + 1 < data.Length; i += 2)
+            {
+                ushort value = (ushort)(data[i] | (data[i + 1] << 8));
+                if (value == 0 || !seen.Add(value)) continue;
+                if (!byHash.TryGetValue(value, out ThingDef now) || now.saveCompressible) continue; // a value with no def stays with the game's own back-compat path
+                if (BackCompatibility.BackCompatibleThingDefWithShortHash_Force(value, ScribeMetaHeaderUtility.loadedGameVersionMajor, ScribeMetaHeaderUtility.loadedGameVersionMinor) != null) continue;
+                if (compressible == null) compressible = DefDatabase<ThingDef>.AllDefsListForReading.FindAll(d => d.saveCompressible);
+                ThingDef match = null;
+                int matches = 0;
+                foreach (ThingDef def in compressible)
+                {
+                    int gap = value - (ushort)(GenText.StableStringHash(def.defName) % 65535);
+                    if (gap >= 0 && gap <= GuessWindow && def.shortHash > value) { match = def; matches++; } // a def pushed off this value now sits above it
+                }
+                if (matches == 1) moves[value] = match.shortHash;
+            }
+            return moves;
+        }
+
+        internal static int Translate(byte[] data, Dictionary<ushort, ushort> moves)
+        {
+            if (moves.Count == 0) return 0;
+            int cells = 0;
+            for (int i = 0; i + 1 < data.Length; i += 2)
+            {
+                if (!moves.TryGetValue((ushort)(data[i] | (data[i + 1] << 8)), out ushort to)) continue;
+                data[i] = (byte)(to & 0xFF);
+                data[i + 1] = (byte)(to >> 8);
+                cells++;
+            }
+            return cells;
+        }
+
+        static string Describe(Dictionary<ushort, ushort> moves, Dictionary<ushort, ThingDef> byHash)
+        {
+            List<string> parts = new List<string>();
+            foreach (KeyValuePair<ushort, ushort> move in moves) parts.Add(move.Key + " -> " + move.Value + " " + (byHash.TryGetValue(move.Value, out ThingDef def) ? def.defName : "?"));
+            return string.Join(", ", parts);
+        }
+
+        // Two defs whose saved values chain (one def's old value is the other's current value) must both land right.
+        internal static string SelfTest()
+        {
+            List<ThingDef> defs = DefDatabase<ThingDef>.AllDefsListForReading.FindAll(d => d.saveCompressible && d.shortHash != 0);
+            if (defs.Count < 2) return "fewer than two compressible defs";
+            ThingDef a = defs[0], b = defs[1];
+            Dictionary<ushort, ThingDef> byHash = ByHash();
+            ushort free = 1;
+            while (byHash.ContainsKey(free)) free++;
+            ushort[] saved = { free, a.shortHash, 0, free };
+            byte[] data = new byte[saved.Length * 2];
+            for (int i = 0; i < saved.Length; i++) { data[i * 2] = (byte)(saved[i] & 0xFF); data[i * 2 + 1] = (byte)(saved[i] >> 8); }
+            int cells = Translate(data, MovesFromNames(new List<string> { free + "=" + a.defName, a.shortHash + "=" + b.defName, "bad", "7=NoSuchDef" }));
+            ushort[] want = { a.shortHash, b.shortHash, 0, a.shortHash };
+            for (int i = 0; i < want.Length; i++)
+                if ((ushort)(data[i * 2] | (data[i * 2 + 1] << 8)) != want[i]) return "cell " + i + " is " + (data[i * 2] | (data[i * 2 + 1] << 8)) + ", want " + want[i];
+            if (cells != 3) return "moved " + cells + " cells, want 3";
+            List<string> names = NamesIn(data, byHash);
+            if (!names.Contains(a.shortHash + "=" + a.defName) || !names.Contains(b.shortHash + "=" + b.defName)) return "names list is missing an entry";
+            return null;
+        }
+    }
+
+    static class BulletSoundsMeleeContext
+    {
+        // Bullet Sounds patches Verb_MeleeAttack.ApplyMeleeDamageToTarget, which is abstract, so Harmony refuses and the mod logs
+        // two warnings on every launch. Its cast patch already covers the vanilla call; put this prefix and finalizer on every
+        // override so direct calls are covered too, and tell its own attempt there is nothing to patch.
+        internal static void Apply() => Lp.Run("bulletsounds-melee-context", () =>
+        {
+            Type patch = AccessTools.TypeByName("Senilia.BulletSounds.Verb_MeleeAttack_ApplyDamage_Context");
+            if (patch == null) return "Bullet Sounds not loaded";
+            MethodInfo prepare = AccessTools.Method(patch, "Prepare"), prefix = AccessTools.Method(patch, "Prefix"), finalizer = AccessTools.Method(patch, "Finalizer");
+            if (prepare == null || prefix == null || finalizer == null) return "patch class changed";
+            MethodInfo target = AccessTools.Method(typeof(RimWorld.Verb_MeleeAttack), "ApplyMeleeDamageToTarget");
+            if (target == null || !target.IsAbstract) return "target is not abstract, the mod can patch it itself";
+            Harmony harmony = new Harmony(Lp.Id);
+            int count = 0;
+            foreach (Type type in typeof(RimWorld.Verb_MeleeAttack).AllSubclasses())
+            {
+                if (type.ContainsGenericParameters) continue; // an open generic type has no method to patch
+                MethodInfo over =AccessTools.DeclaredMethod(type, "ApplyMeleeDamageToTarget");
+                if (over == null || over.IsAbstract) continue;
+                harmony.Patch(over, prefix: new HarmonyMethod(prefix), finalizer: new HarmonyMethod(finalizer));
+                count++;
+            }
+            if (count == 0) return "no override found";
+            harmony.Patch(prepare, postfix: new HarmonyMethod(typeof(BulletSoundsMeleeContext), nameof(NothingToPatch)));
+            Lp.Note = count + " overrides";
+            return null;
+        });
+
+        static void NothingToPatch(ref bool __result) => __result = false;
+    }
+
+    static class VeeSpaceBattleCell
+    {
+        // The space battle event ignores a failed search for a landing cell and spawns its 2x2 ship chunk at whatever cell the
+        // search last tried. With no trade ship the search centre is the map corner, so on a coast map each drop logged "Tried to
+        // spawn ... out of bounds" and the chunk was lost. A failed or non-fitting result gets a cell from a search of the whole
+        // map outside the home area; if that finds nothing the event behaves as before.
+        internal static void Apply() => Lp.Run("vee-spacebattle-cell", () =>
+        {
+            MethodInfo find = AccessTools.Method("VEE.RegularEvents.SpaceBattle:VEETryFindSkyfallerCell");
+            if (find == null) return "Vanilla Events Expanded not loaded";
+            new Harmony(Lp.Id).Patch(find, postfix: new HarmonyMethod(typeof(VeeSpaceBattleCell), nameof(Postfix)));
+            return null;
+        });
+
+        static void Postfix(ThingDef skyfaller, Map map, ref IntVec3 pos, ref bool __result)
+        {
+            if (__result && Fits(skyfaller, pos, map)) return;
+            // Away from the home area and from colonists: one of the chunks explodes when it lands.
+            __result = CellFinderLoose.TryFindSkyfallerCell(skyfaller, map, RimWorld.TerrainAffordanceDefOf.Walkable, out IntVec3 found, 10, default(IntVec3), -1, false, true, true, false, true, false, c => c.InBounds(map) && !c.Fogged(map) && c.Walkable(map) && !map.areaManager.Home[c]) && Fits(skyfaller, found, map);
+            if (__result) pos = found;
+        }
+
+        static bool Fits(ThingDef skyfaller, IntVec3 cell, Map map) => cell.IsValid && GenAdj.OccupiedRect(cell, Rot4.North, skyfaller.size).InBounds(map);
+    }
+
+    static class FlareShieldGenetron
+    {
+        // During a solar flare VQE The Generator charges batteries straight from Genetrons that work in flares, because the
+        // net itself is down. RT Solar Flare Shield keeps the net running under a shield, where the Genetron's output already
+        // counts, so with a shield up the batteries were charged twice. The battery path now runs only when RT also says the
+        // net is down.
+        static Func<RimWorld.GameConditionManager, Map, bool> disabled;
+
+        internal static void Apply() => Lp.Run("flare-shield-genetron", () =>
+        {
+            MethodInfo rt = AccessTools.Method("RT_SolarFlareShield.Patch_PowerNetTick:ElectricityDisabled");
+            if (rt == null) return "RT Solar Flare Shield not loaded";
+            MethodInfo batteries = AccessTools.Method("VanillaQuestsExpandedTheGenerator.VanillaQuestsExpandedTheGenerator_PowerNet_PowerNetTick_Patch:PowerBatteries");
+            if (batteries == null) return "VQE The Generator not loaded";
+            disabled = AccessTools.MethodDelegate<Func<RimWorld.GameConditionManager, Map, bool>>(rt);
+            new Harmony(Lp.Id).Patch(batteries, prefix: new HarmonyMethod(typeof(FlareShieldGenetron), nameof(Batteries)));
+            return null;
+        });
+
+        // The patched method is another mod's postfix, a static method, so its argument is read by position.
+        internal static bool Batteries(RimWorld.PowerNet __0) => disabled(__0.Map.gameConditionManager, __0.Map);
+    }
+
+    static class DispenserAnimalToils
+    {
+        // Animals Logic gives animals and wild men their own toils for a nutrient paste dispenser. Common Sense's prefix on the
+        // same method runs first and, with its "clean before eating" option on, replaces the toils for every pawn and skips the
+        // rest. Ask Animals Logic first.
+        delegate bool AnimalToils(ref RimWorld.JobDriver_Ingest driver, ref IEnumerable<Verse.AI.Toil> result);
+        static AnimalToils animalToils;
+
+        internal static void Apply() => Lp.Run("dispenser-animal-toils", () =>
+        {
+            MethodInfo theirs = AccessTools.Method("AnimalsLogic.AnimalsUseDispenser:PrepareToIngestToils_DispenserPrefix");
+            if (theirs == null) return "Animals Logic not loaded";
+            MethodInfo target = AccessTools.Method(typeof(RimWorld.JobDriver_Ingest), "PrepareToIngestToils_Dispenser");
+            if (target == null) return "JobDriver_Ingest.PrepareToIngestToils_Dispenser not found";
+            animalToils = AccessTools.MethodDelegate<AnimalToils>(theirs);
+            new Harmony(Lp.Id).Patch(target, prefix: new HarmonyMethod(typeof(DispenserAnimalToils), nameof(Prefix)) { priority = Priority.First });
+            return null;
+        });
+
+        static bool Prefix(ref RimWorld.JobDriver_Ingest __instance, ref IEnumerable<Verse.AI.Toil> __result) => animalToils(ref __instance, ref __result);
+    }
+
+    static class GearRowHiddenFirst
+    {
+        // Belt Lantern and Exosuit Framework hide a gear tab row by skipping DrawThingRow. Common Sense's prefix on that method
+        // runs before theirs and has by then drawn its unload button for the hidden thing, which is left on top of the next
+        // row's button and takes its clicks. Ask the hiding prefixes first.
+        static readonly List<Func<Thing, bool>> shows = new List<Func<Thing, bool>>();
+
+        internal static void Apply() => Lp.Run("gear-row-hidden-first", () =>
+        {
+            foreach (string name in new[] { "LanternMod.LanternGearDuplicateRowPatch:Prefix", "Exosuit.ITab_Pawn_Gear_DrawThingRow:DrawThingRow" })
+            {
+                MethodInfo hide = AccessTools.Method(name);
+                if (hide != null) shows.Add(AccessTools.MethodDelegate<Func<Thing, bool>>(hide));
+            }
+            if (shows.Count == 0) return "no row-hiding mod loaded";
+            MethodInfo target = AccessTools.Method(typeof(RimWorld.ITab_Pawn_Gear), "DrawThingRow");
+            if (target == null) return "ITab_Pawn_Gear.DrawThingRow not found";
+            new Harmony(Lp.Id).Patch(target, prefix: new HarmonyMethod(typeof(GearRowHiddenFirst), nameof(Prefix)) { priority = Priority.First });
+            Lp.Note = shows.Count + " hiding prefixes";
+            return null;
+        });
+
+        internal static bool Prefix(Thing thing)
+        {
+            foreach (Func<Thing, bool> show in shows)
+                if (!show(thing)) return false;
+            return true;
+        }
+    }
+
+    static class CastSourceChain
+    {
+        // VFE Deserters and Vanilla Gravship Expanded each replace Thing.DrawPos in TryCastShot and DrawAimPie with their own
+        // "barrel position" helper. The first replacement leaves nothing for the second to find, so a gravship turret's shots
+        // and aim pie started at the turret centre. A last pass points whichever helper is there at one that knows both.
+        static MethodInfo barrelsHelper, gravshipHelper;
+        static Type barrelsType;
+        static Func<Thing, Vector3> barrelsSource, gravshipSource;
+        static int replaced;
+
+        internal static void Apply() => Lp.Run("cast-source-chain", () =>
+        {
+            barrelsType = AccessTools.TypeByName("VFED.Building_TurretGunBarrels");
+            barrelsHelper = barrelsType == null ? null : AccessTools.Method(barrelsType, "GetCastSource");
+            if (barrelsHelper == null) return "VFE Deserters not loaded";
+            gravshipHelper = AccessTools.Method("VanillaGravshipExpanded.Building_GravshipTurret:GetCastSource");
+            if (gravshipHelper == null) return "Vanilla Gravship Expanded not loaded";
+            barrelsSource = AccessTools.MethodDelegate<Func<Thing, Vector3>>(barrelsHelper);
+            gravshipSource = AccessTools.MethodDelegate<Func<Thing, Vector3>>(gravshipHelper);
+            Harmony harmony = new Harmony(Lp.Id);
+            HarmonyMethod last = new HarmonyMethod(typeof(CastSourceChain), nameof(Transpiler)) { priority = Priority.Last };
+            harmony.Patch(AccessTools.Method(typeof(Verb_LaunchProjectile), "TryCastShot"), transpiler: last);
+            int inShot = replaced;
+            harmony.Patch(AccessTools.Method(typeof(GenDraw), nameof(GenDraw.DrawAimPie)), transpiler: last);
+            int inPie = replaced - inShot;
+            if (replaced == 0) return "neither helper is called in TryCastShot or DrawAimPie";
+            Lp.Note = "TryCastShot " + inShot + ", DrawAimPie " + inPie;
+            return null;
+        });
+
+        static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> code)
+        {
+            MethodInfo either = AccessTools.Method(typeof(CastSourceChain), nameof(Either));
+            foreach (CodeInstruction ins in code)
+            {
+                if (ins.operand is MethodInfo called && (called == barrelsHelper || called == gravshipHelper)) { ins.opcode = OpCodes.Call; ins.operand = either; replaced++; }
+                yield return ins;
+            }
+        }
+
+        // The gravship helper returns DrawPos for anything that is not a gravship turret.
+        internal static Vector3 Either(Thing thing) => barrelsType.IsInstanceOfType(thing) ? barrelsSource(thing) : gravshipSource(thing);
     }
 
     static class Lp

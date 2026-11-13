@@ -13,7 +13,7 @@ import shutil
 import sys
 
 TSV = os.path.expandvars(r'%USERPROFILE%\AppData\LocalLow\Ludeon Studios\RimWorld by Ludeon Studios\Config\TranslationErrors-English.tsv')
-BACKUP = r'E:\Rimworld Mod\_quarantine\lang-prune-20261102'
+BACKUP = r'J:\Rimworld Mod\_quarantine\lang-prune-20261113'
 WORKSHOP = r'F:\Steam\steamapps\workshop\content\294100'
 APPLY = '--apply' in sys.argv
 

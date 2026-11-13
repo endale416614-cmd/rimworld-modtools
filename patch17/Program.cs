@@ -161,7 +161,32 @@ foreach (var type in module.GetTypes().ToList())
         var il = body.GetILProcessor();
         foreach (var ins in body.Instructions.ToList())
         {
-            if (ins.Operand is MethodReference m && (ins.OpCode == OpCodes.Call || ins.OpCode == OpCodes.Callvirt))
+            // Waylith build 5005 widened ProfilerLabelId from ushort to int: get_Value returns int, the constructor takes int
+            if (ins.Operand is MethodReference pl && pl.DeclaringType.FullName == "Waylith.Profiling.ProfilerLabelId"
+                && (ins.OpCode == OpCodes.Call || ins.OpCode == OpCodes.Callvirt || ins.OpCode == OpCodes.Newobj)
+                && ((pl.Name == "get_Value" && pl.ReturnType.MetadataType == MetadataType.UInt16)
+                    || (pl.Name == ".ctor" && pl.Parameters.Count == 1 && pl.Parameters[0].ParameterType.MetadataType == MetadataType.UInt16)))
+            {
+                if (pl.Name == "get_Value")
+                {
+                    ins.Operand = new MethodReference(pl.Name, ts.Int32, pl.DeclaringType) { HasThis = true };
+                    // value stays int: a ushort on the IL stack is an int32 already
+                    Hit("ProfilerLabelId.get_Value ushort -> int");
+                }
+                else
+                {
+                    var r = new MethodReference(pl.Name, ts.Void, pl.DeclaringType) { HasThis = true };
+                    r.Parameters.Add(new ParameterDefinition(ts.Int32));
+                    ins.Operand = r;
+                    Hit("ProfilerLabelId..ctor(ushort) -> (int)");
+                    if (ins.Previous?.OpCode == OpCodes.Conv_U2)
+                    {
+                        ins.Previous.OpCode = OpCodes.Nop; // keep the instruction so branches to it still land
+                        Hit("ProfilerLabelId..ctor argument conv.u2 -> nop");
+                    }
+                }
+            }
+            else if (ins.Operand is MethodReference m && (ins.OpCode == OpCodes.Call || ins.OpCode == OpCodes.Callvirt))
             {
                 var dt = m.DeclaringType.GetElementType().FullName;
                 // .NET List<T>.EnsureCapacity returns int (Mono's was void)
