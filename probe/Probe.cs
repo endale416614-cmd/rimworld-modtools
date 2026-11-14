@@ -19,6 +19,8 @@
 //            control, then make a temporary save (deleted right after).
 //   conflicts : load LP17_PROBE_SAVE, check the mod conflict fixes (nutrient paste dispenser toils, gear row hiding, flare shield and Genetron, turret cast source),
 //            then unpatch them and repeat as a control that must show the opposite. It changes settings and spawns things in memory only, undoes them, and saves nothing.
+//   landmark : needs Odyssey. On the current map's tile, set a deterministic landmark through the "Set landmark" float menu, check its required mutators land on the tile, remove it through "Remove landmark", check the mutators are stripped, then restore the old landmark in memory. Saves nothing.
+//   sitepage : from the main menu, open the real Select Starting Site page of a new Crashlanded game, check the Set landmark gizmo is in the world gizmo grid drawn on that page, and screenshot it. Saves nothing and creates no colony.
 // Every mode also writes exceptions that were thrown, caught or not, to LP17_PROBE_OUT.exceptions.tsv.
 // Every line starts with [PROBE so harness/proberun.ps1 can attribute errors to the step before them.
 using System;
@@ -52,7 +54,8 @@ namespace LP17Hotfix
             });
             AppDomain.CurrentDomain.FirstChanceException += (s, e) => CountException(e.Exception);
             if (mode == "static" || mode == "dump") new Harmony("local.lp17.probe").Patch(AccessTools.Method(typeof(Root_Entry), "Update"), postfix: new HarmonyMethod(typeof(Probe), nameof(MenuFrame)));
-            else if (mode == "soak" || mode == "gear" || mode == "scan" || mode == "autoresearch" || mode == "hemogentap" || mode == "bs9000gif" || mode == "newgame" || mode == "select" || mode == "conflicts")
+            else if (mode == "sitepage") new Harmony("local.lp17.probe").Patch(AccessTools.Method(typeof(Root_Entry), "Update"), postfix: new HarmonyMethod(typeof(Probe), nameof(SitePageFrame)));
+            else if (mode == "soak" || mode == "gear" || mode == "scan" || mode == "autoresearch" || mode == "hemogentap" || mode == "bs9000gif" || mode == "newgame" || mode == "select" || mode == "conflicts" || mode == "landmark")
             {
                 Harmony h = new Harmony("local.lp17.probe");
                 h.Patch(AccessTools.Method(typeof(Autosaver), "AutosaverTick"), prefix: new HarmonyMethod(typeof(Probe), nameof(No)));
@@ -368,7 +371,7 @@ namespace LP17Hotfix
             Log.ResetMessageCount();
             foreach (Window w in Find.WindowStack.Windows.ToList())
                 if (w.forcePause || w is Dialog_MessageBox || filming) w.Close(false);
-            if (run == null) { Log.Message("[PROBE] playing"); run = (mode == "gear" ? Gear() : mode == "scan" ? Scan() : mode == "autoresearch" ? AutoResearchTest() : mode == "hemogentap" ? BS9000Test() : mode == "bs9000gif" ? Bs9000Gif() : mode == "newgame" ? NewGameTest() : mode == "select" ? SelectTest() : mode == "conflicts" ? ConflictsTest() : Soak()).GetEnumerator(); }
+            if (run == null) { Log.Message("[PROBE] playing"); run = (mode == "gear" ? Gear() : mode == "scan" ? Scan() : mode == "autoresearch" ? AutoResearchTest() : mode == "hemogentap" ? BS9000Test() : mode == "bs9000gif" ? Bs9000Gif() : mode == "newgame" ? NewGameTest() : mode == "select" ? SelectTest() : mode == "conflicts" ? ConflictsTest() : mode == "landmark" ? LandmarkTest() : Soak()).GetEnumerator(); }
             Stopwatch sw = Stopwatch.StartNew();
             try
             {
@@ -1400,6 +1403,240 @@ namespace LP17Hotfix
             yield return 1;
 
             pawn.health.RemoveHediff(pawn.health.hediffSet.GetFirstHediffOfDef(tap));
+        }
+
+        // ---- Landmark Editor: the Set and Remove landmark gizmos, driven through the real float menu ----
+
+        static IEnumerable<int> LandmarkTest()
+        {
+            foreach (int x in LandmarkRun()) yield return x;
+            Log.Message($"[PROBE] landmark failures: {autoFails}");
+        }
+
+        static bool DeterministicLandmark(LandmarkDef def) =>
+            def.mutatorChances != null && def.mutatorChances.Any(mc => mc != null && mc.required && mc.chance >= 1f && mc.mutator != null);
+
+        // Matched by label only, so the mod's assembly is not referenced.
+        static List<Command_Action> TileActions(RimWorld.Planet.Tile t) =>
+            (t.GetGizmos() ?? Enumerable.Empty<Gizmo>()).OfType<Command_Action>().ToList();
+
+        static IEnumerable<int> LandmarkRun()
+        {
+            Find.TickManager.CurTimeSpeed = TimeSpeed.Paused;
+            Expect(ModsConfig.OdysseyActive, "landmark test needs Odyssey");
+            if (!ModsConfig.OdysseyActive) yield break;
+            Expect(Find.World != null && Find.CurrentMap != null, "a world and a map exist (quick-test play)");
+            if (Find.World == null || Find.CurrentMap == null) yield break;
+
+            var pt = Find.CurrentMap.Tile;
+            var t = Find.World.grid[pt];
+            Expect(t != null, "world grid has a tile for the current map");
+            if (t == null) yield break;
+            LandmarkDef original = t.Landmark?.def;
+            string originalName = original == null ? "none" : original.defName;
+            Log.Message($"[PROBE] landmark tile {pt}: current landmark {originalName}");
+
+            Mark("gizmos");
+            Command_Action setGizmo = TileActions(t).FirstOrDefault(a => a.defaultLabel == "Set landmark");
+            Expect(setGizmo != null, "Set landmark gizmo present (Harmony postfix applied)");
+            if (setGizmo == null) yield break;
+            bool removeShown = TileActions(t).Any(a => a.defaultLabel == "Remove landmark");
+            bool hasLandmark = t.Landmark != null;
+            Expect(removeShown == hasLandmark, "Remove landmark gizmo shown only when the tile has a landmark (shown " + removeShown + ", landmark " + hasLandmark + ")");
+
+            Mark("clean slate");
+            if (hasLandmark)
+            {
+                Command_Action oldRemove = TileActions(t).FirstOrDefault(a => a.defaultLabel == "Remove landmark");
+                if (oldRemove != null) Guard("remove existing landmark", () => oldRemove.action());
+                Expect(t.Landmark == null, "existing landmark removed before the test");
+            }
+
+            Mark("pick def");
+            List<LandmarkDef> defs = DefDatabase<LandmarkDef>.AllDefsListForReading;
+            // Several defs share one label ("lake" covers four), so pick one whose label is unique: the menu entry is then the plain label.
+            var labelCounts = defs.GroupBy(d => d.LabelCap.ToString()).ToDictionary(g => g.Key, g => g.Count());
+            Func<LandmarkDef, bool> usable = d => DeterministicLandmark(d) && labelCounts[d.LabelCap.ToString()] == 1;
+            LandmarkDef chosen = defs.FirstOrDefault(d => d.defName == "Valley" && usable(d)) ?? defs.FirstOrDefault(usable);
+            if (chosen == null) { Expect(false, "no deterministic landmark def with a unique label found"); yield break; }
+            Log.Message("[PROBE] landmark chosen " + chosen.defName);
+            var expected = chosen.mutatorChances.Where(mc => mc != null && mc.required && mc.chance >= 1f && mc.mutator != null).Select(mc => mc.mutator).ToList();
+
+            Mark("set through the float menu");
+            var menusBefore = Find.WindowStack.Windows.OfType<FloatMenu>().ToList();
+            Guard("set landmark gizmo", () => setGizmo.action());
+            FloatMenu menu = null;
+            foreach (int x in WaitFor(() => (menu = Find.WindowStack.Windows.OfType<FloatMenu>().FirstOrDefault(m => !menusBefore.Contains(m))) != null, 120)) yield return x;
+            Expect(menu != null, "Set landmark opens a float menu");
+            if (menu == null) yield break;
+            string cap = chosen.LabelCap.ToString();
+            var options = (List<FloatMenuOption>)AccessTools.Field(typeof(FloatMenu), "options").GetValue(menu);
+            Expect(options != null && options.Count == defs.Count, "float menu lists every landmark def (" + (options == null ? 0 : options.Count) + " of " + defs.Count + ")");
+            var dupLabels = (options ?? new List<FloatMenuOption>()).GroupBy(o => o.Label).Where(g => g.Count() > 1).Select(g => g.Key).ToList();
+            Expect(dupLabels.Count == 0, "every float menu entry has a distinct label" + (dupLabels.Count == 0 ? "" : ": repeated " + string.Join(", ", dupLabels)));
+            FloatMenuOption pick = options?.FirstOrDefault(o => o.Label == cap || o.Label == cap + " (not normally valid here)");
+            Expect(pick != null, "float menu offers " + cap);
+            if (pick != null) Guard("pick " + cap, () => pick.action());
+            Find.WindowStack.TryRemove(menu, false);
+            yield return 1;
+
+            Mark("set checks");
+            Expect(t.Landmark != null && t.Landmark.def == chosen, "Set landmark makes " + chosen.defName + " the tile's landmark");
+            Expect(t.Landmark != null && !string.IsNullOrEmpty(t.Landmark.name), "new landmark has a name");
+            Expect(t.Landmark != null && ReferenceEquals(Find.World.landmarks[pt], t.Landmark), "world landmark table holds the same landmark object");
+            Expect(t.Mutators != null && expected.All(m => t.Mutators.Contains(m)), "required mutators of " + chosen.defName + " are on the tile: " + string.Join(", ", expected.Select(m => m.defName)));
+
+            Mark("remove through the gizmo");
+            Command_Action removeGizmo = TileActions(t).FirstOrDefault(a => a.defaultLabel == "Remove landmark");
+            Expect(removeGizmo != null, "Remove landmark gizmo shown after setting a landmark");
+            if (removeGizmo != null) Guard("remove landmark gizmo", () => removeGizmo.action());
+            yield return 1;
+            Expect(t.Landmark == null, "Remove landmark clears the tile's landmark");
+            Expect(Find.World.landmarks[pt] == null, "world landmark table has no entry for the tile");
+            var left = expected.Where(m => t.Mutators != null && t.Mutators.Contains(m)).Select(m => m.defName).ToList();
+            Expect(left.Count == 0, "Remove landmark strips the mutators" + (left.Count == 0 ? "" : ": still on the tile " + string.Join(", ", left)));
+
+            Mark("restore");
+            if (original != null) Guard("restore landmark", () => Find.World.landmarks.AddLandmark(original, pt, t.Layer, true));
+            string restored = original == null ? "no landmark to restore" : t.Landmark?.def == original ? "restored " + originalName : "not restored";
+            Log.Message("[PROBE] landmark restore: " + restored);
+        }
+
+        // ---- Select Starting Site: does the Set landmark gizmo reach the world gizmo grid on that page ----
+
+        static IEnumerator<int> sitePageRun;
+        static bool sitePageGizmoDrawn;
+        static int sitePageDraws, sitePageGizmos;
+        static string sitePageLabels = "";
+
+        // Runs from the main menu, like the static and dump modes, because the new game is started from there.
+        static void SitePageFrame()
+        {
+            if (sitePageRun == null) { Log.Message("[PROBE] sitepage start"); sitePageRun = SitePageTest().GetEnumerator(); }
+            Stopwatch sw = Stopwatch.StartNew();
+            try
+            {
+                while (sw.ElapsedMilliseconds < 80)
+                {
+                    if (!sitePageRun.MoveNext()) { Finish(); sitePageRun = Idle().GetEnumerator(); return; }
+                    if (sitePageRun.Current > 0) return;
+                }
+            }
+            catch (Exception e) { Log.Error("[PROBE] step threw: " + e); sitePageRun = Idle().GetEnumerator(); }
+        }
+
+        static IEnumerable<int> SitePageTest()
+        {
+            foreach (int x in SitePageRun()) yield return x;
+            Log.Message($"[PROBE] sitepage failures: {autoFails}");
+        }
+
+        static T SetupField<T>(Page_CreateWorldParams page, string name) => (T)AccessTools.Field(typeof(Page_CreateWorldParams), name).GetValue(page);
+
+        // The same call CanDoNext queues for the world parameters page, then the page that CanDoNext opens after it.
+        static void GenerateStartingWorld(float coverage, string seed, RimWorld.Planet.OverallRainfall rainfall, RimWorld.Planet.OverallTemperature temperature, RimWorld.Planet.OverallPopulation population, RimWorld.Planet.LandmarkDensity landmarkDensity, List<FactionDef> factions, float pollution)
+        {
+            Find.GameInitData.ResetWorldRelatedMapInitData();
+            Current.Game.World = RimWorld.Planet.WorldGenerator.GenerateWorld(coverage, seed, rainfall, temperature, population, landmarkDensity, factions, pollution);
+            LongEventHandler.ExecuteWhenFinished(() =>
+            {
+                Find.World.renderer.RegenerateAllLayersNow();
+                Find.WindowStack.Add(new Page_SelectStartingSite());
+            });
+        }
+
+        // Prefix on DrawGizmoGridFor: records what the gizmo grid was handed, without changing it.
+        static void SitePageGridPre(IEnumerable<object> __0)
+        {
+            var objects = __0 == null ? new List<object>() : __0.ToList();
+            var commands = objects.OfType<Command_Action>().ToList();
+            sitePageDraws++;
+            sitePageGizmos = objects.OfType<Gizmo>().Count();
+            sitePageLabels = string.Join(", ", commands.Select(c => c.defaultLabel));
+            if (commands.Any(c => c.defaultLabel == "Set landmark")) sitePageGizmoDrawn = true;
+        }
+
+        static IEnumerable<int> SitePageRun()
+        {
+            foreach (int x in Frames(600)) yield return x; // the main menu settles, as in MenuFrame
+            Log.Message("[PROBE] sitepage odyssey active: " + ModsConfig.OdysseyActive);
+
+            Mark("new game");
+            Expect(ScenarioDefOf.Crashlanded != null, "Crashlanded scenario def exists");
+            if (ScenarioDefOf.Crashlanded == null) yield break;
+            Guard("new game", () =>
+            {
+                Game.ClearCaches();
+                Current.Game = new Game();
+                Current.Game.InitData = new GameInitData();
+                Current.Game.Scenario = ScenarioDefOf.Crashlanded.scenario;
+                Current.Game.Scenario.PreConfigure();
+                Find.GameInitData.startedFromEntry = true;
+            });
+
+            Mark("world parameters");
+            var setup = new Page_CreateWorldParams();
+            setup.Reset();
+            const float coverage = 0.05f; // Reset() picks 0.3 or 0.5 outside dev mode; the probe asks for a small world instead.
+            string seed = SetupField<string>(setup, "seedString");
+            RimWorld.Planet.OverallRainfall rainfall = SetupField<RimWorld.Planet.OverallRainfall>(setup, "rainfall");
+            RimWorld.Planet.OverallTemperature temperature = SetupField<RimWorld.Planet.OverallTemperature>(setup, "temperature");
+            RimWorld.Planet.OverallPopulation population = SetupField<RimWorld.Planet.OverallPopulation>(setup, "population");
+            RimWorld.Planet.LandmarkDensity landmarkDensity = SetupField<RimWorld.Planet.LandmarkDensity>(setup, "landmarkDensity");
+            List<FactionDef> factions = SetupField<List<FactionDef>>(setup, "factions");
+            Expect(factions != null, "world parameters page has a faction list");
+            if (factions == null) yield break;
+
+            Mark("generate the world");
+            Guard("queue world generation", () => LongEventHandler.QueueLongEvent(() => GenerateStartingWorld(coverage, seed, rainfall, temperature, population, landmarkDensity, factions, setup.pollution), "GeneratingWorld", true, null, true, false, null));
+            foreach (int x in WaitFor(() => Find.World != null && !LongEventHandler.AnyEventNowOrWaiting, 9000)) yield return x;
+            Expect(Find.World != null && !LongEventHandler.AnyEventNowOrWaiting, "world generated within 9000 frames");
+            if (Find.World == null || LongEventHandler.AnyEventNowOrWaiting) yield break;
+
+            Mark("open the page");
+            foreach (int x in WaitFor(() => Find.WindowStack.Windows.OfType<Page_SelectStartingSite>().Any(), 600)) yield return x;
+            Page_SelectStartingSite page = Find.WindowStack.Windows.OfType<Page_SelectStartingSite>().FirstOrDefault();
+            Expect(page != null, "Select Starting Site page opened");
+            if (page == null) yield break;
+            foreach (int x in WaitFor(() => RimWorld.Planet.WorldRendererUtility.WorldSelected, 600)) yield return x;
+            foreach (int x in Frames(10)) yield return x; // let the UI settle before the checks and the screenshot
+
+            Mark("checks");
+            Window top = Find.WindowStack.Windows.FirstOrDefault();
+            Expect(ReferenceEquals(top, page), "the page is the top window (top: " + (top == null ? "none" : top.GetType().Name) + ")");
+            Expect(RimWorld.Planet.WorldRendererUtility.WorldSelected, "world view is selected (render mode " + RimWorld.Planet.WorldRendererUtility.CurrentWorldRenderMode + ")");
+            Expect(Find.TilePicker != null && !Find.TilePicker.Active, "tile picker is not active");
+
+            RimWorld.Planet.PlanetTile selected = Find.WorldSelector.SelectedTile;
+            if (selected == RimWorld.Planet.PlanetTile.Invalid)
+            {
+                Log.Message("[PROBE] sitepage selected tile was invalid, setting the starting tile " + Find.GameInitData.startingTile);
+                Find.WorldSelector.SelectedTile = Find.GameInitData.startingTile;
+                selected = Find.WorldSelector.SelectedTile;
+            }
+            Expect(selected != RimWorld.Planet.PlanetTile.Invalid, "a world tile is selected (" + selected + ")");
+            if (selected == RimWorld.Planet.PlanetTile.Invalid || selected.Tile == null) { Expect(false, "the selected tile has a world tile to read gizmos from"); yield break; }
+
+            List<Command_Action> tileActions = TileActions(selected.Tile);
+            Expect(tileActions.Any(a => a.defaultLabel == "Set landmark"), "the selected tile's gizmos include Set landmark (" + tileActions.Count + " actions)");
+
+            Mark("screenshot");
+            Shot("sitepage");
+            foreach (int x in Frames(10)) yield return x;
+            string shotPath = Path.Combine(GenFilePaths.ScreenshotFolderPath, "LP17Probe-sitepage.png");
+            Expect(File.Exists(shotPath), "screenshot written: " + shotPath);
+
+            Mark("grid drawer");
+            sitePageDraws = 0;
+            sitePageGizmoDrawn = false;
+            Harmony sitePatch = new Harmony("local.lp17.probe.sitepage");
+            MethodInfo drawGrid = AccessTools.Method(typeof(GizmoGridDrawer), nameof(GizmoGridDrawer.DrawGizmoGridFor));
+            Guard("patch DrawGizmoGridFor", () => sitePatch.Patch(drawGrid, prefix: new HarmonyMethod(typeof(Probe), nameof(SitePageGridPre))));
+            foreach (int x in Frames(60)) yield return x;
+            Guard("unpatch DrawGizmoGridFor", () => sitePatch.Unpatch(drawGrid, HarmonyPatchType.Prefix, "local.lp17.probe.sitepage"));
+            Expect(sitePageDraws > 0, "the world gizmo grid was drawn on the page (" + sitePageDraws + " draws)");
+            Expect(sitePageGizmoDrawn, "Set landmark reached DrawGizmoGridFor on the page");
+            Log.Message($"[PROBE] sitepage grid: last draw had {sitePageGizmos} gizmos, Command_Action labels: {sitePageLabels}");
         }
 
         // ---- Hemogen Tap promo scene ----
