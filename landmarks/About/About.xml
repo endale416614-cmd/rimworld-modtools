@@ -3,15 +3,19 @@
   <name>Landmark Editor</name>
   <author>Faeris</author>
   <packageId>local.landmark.editor</packageId>
-  <modVersion>1.0.0</modVersion>
+  <modVersion>1.2.0</modVersion>
   <supportedVersions>
     <li>1.7</li>
   </supportedVersions>
-  <description>Adds two entries to the gizmos of a selected world tile in the Odyssey world view: "Set landmark" picks any landmark type for the tile and replaces the current one, and "Remove landmark" clears the landmark and the terrain mutators (lake, valley and similar) that the landmark added.
+  <description>Adds an "Edit tile" button to the gizmos of a selected world tile in the Odyssey world view. It opens a tile editor window with two tabs.
 
-Mutator changes only affect maps generated afterwards. Maps that are already generated keep their terrain.
+Landmark: every landmark type in the game, with its name, defName, category and icon, a search box and a filter for the ones that fit the tile. Set one on a tile that has none, replace the one it has, or remove it. Removing also clears the features the landmark added.
 
-Removing a landmark also removes any mutator with the same name that the tile received from world generation.
+Features: every tile feature (tile mutator) in the game, including the ones mods add, such as deadlife geysers. The tile's own features are listed first and can be removed one by one; any other can be added. A feature the game would refuse because one already on the tile outranks it is shown but cannot be added.
+
+Changes only affect maps generated afterwards. Maps that are already generated keep their terrain.
+
+Removing a landmark also removes any feature with the same name that the tile received from world generation.
 
 Requires Odyssey and Harmony.</description>
   <modDependencies>
