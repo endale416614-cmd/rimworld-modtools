@@ -159,6 +159,246 @@
     </children>
   </EffecterDef>
 
+  <!-- BS-7500 Drain Lance. Built on the vanilla psychic lances: an apparel with a
+       targeted verb, no projectile, and CompApparelReloadable set to one charge so
+       the lance destroys itself the moment it is fired. -->
+  <ThingDef ParentName="ApparelNoQualityBase">
+    <defName>BS7500_DrainLance</defName>
+    <label>BS-7500 drain lance</label>
+    <description>A humanitarian compliance tool built by an Urbworld megacorp to pacify protestors without wasting the protestor. A large-bore needle and a pressure motor empty the subject into a sealed tank, where the contents are liquefied into hemogen packs for the riot police. The subject does not survive the process. Life is cheap on an Urbworld.\n\nThe lance is disposable and tears itself apart on the single use it was built for.</description>
+    <descriptionHyperlinks>
+      <ThingDef>HemogenPack</ThingDef>
+    </descriptionHyperlinks>
+    <graphicData>
+      <texPath>Things/Item/BS9000/DrainLance</texPath>
+      <graphicClass>Graphic_Single</graphicClass>
+    </graphicData>
+    <techLevel>Industrial</techLevel>
+    <tickerType>Normal</tickerType>
+    <thingCategories>
+      <li>ApparelUtility</li>
+    </thingCategories>
+    <statBases>
+      <Mass>2.5</Mass>
+      <EquipDelay>1</EquipDelay>
+      <MaxHitPoints>60</MaxHitPoints>
+      <WorkToMake>6000</WorkToMake>
+      <Flammability>0.4</Flammability>
+    </statBases>
+    <costList>
+      <Steel>30</Steel>
+      <ComponentIndustrial>2</ComponentIndustrial>
+    </costList>
+    <recipeMaker>
+      <unfinishedThingDef>UnfinishedPack</unfinishedThingDef>
+      <researchPrerequisite>BS9000</researchPrerequisite>
+      <recipeUsers>
+        <li>FabricationBench</li>
+      </recipeUsers>
+      <useIngredientsForColor>false</useIngredientsForColor>
+      <workSpeedStat>GeneralLaborSpeed</workSpeedStat>
+      <workSkill>Crafting</workSkill>
+      <effectWorking>Smith</effectWorking>
+      <soundWorking>Recipe_Smith</soundWorking>
+      <skillRequirements>
+        <Crafting>5</Crafting>
+      </skillRequirements>
+      <displayPriority>320</displayPriority>
+    </recipeMaker>
+    <apparel>
+      <countsAsClothingForNudity>false</countsAsClothingForNudity>
+      <scoreOffset>4</scoreOffset>
+      <careIfWornByCorpse>false</careIfWornByCorpse>
+      <careIfDamaged>false</careIfDamaged>
+      <ignoredByNonViolent>true</ignoredByNonViolent>
+      <wearPerDay>0</wearPerDay>
+      <!-- Waist, so the lance and the tank can be worn together. -->
+      <bodyPartGroups>
+        <li>Waist</li>
+      </bodyPartGroups>
+      <layers>
+        <li>Belt</li>
+      </layers>
+      <tags>
+        <li>BS9000_DrainLance</li>
+      </tags>
+      <wornGraphicPath>Things/Item/BS9000/DrainLance</wornGraphicPath>
+    </apparel>
+    <tradeTags>
+      <li>ExoticMisc</li>
+    </tradeTags>
+    <tradeNeverStack>true</tradeNeverStack>
+    <relicChance>0</relicChance>
+    <drawGUIOverlay>false</drawGUIOverlay>
+    <verbs>
+      <li>
+        <verbClass>Verb_CastTargetEffect</verbClass>
+        <label>drain lance</label>
+        <hasStandardCommand>true</hasStandardCommand>
+        <targetable>true</targetable>
+        <onlyManualCast>True</onlyManualCast>
+        <!-- Short reach and a long aim, so this is a close-quarters commitment. -->
+        <range>7.9</range>
+        <warmupTime>3.5</warmupTime>
+        <targetParams>
+          <canTargetBuildings>false</canTargetBuildings>
+          <canTargetAnimals>false</canTargetAnimals>
+          <canTargetMechs>false</canTargetMechs>
+        </targetParams>
+        <soundCast>Bloodfeed_Cast</soundCast>
+        <soundAiming>Interact_Drill</soundAiming>
+      </li>
+    </verbs>
+    <comps>
+      <li Class="CompProperties_ApparelReloadable">
+        <maxCharges>1</maxCharges>
+        <destroyOnEmpty>true</destroyOnEmpty>
+        <hotKey>Misc4</hotKey>
+        <chargeNoun>charge</chargeNoun>
+        <displayGizmoWhileUndrafted>false</displayGizmoWhileUndrafted>
+      </li>
+      <!-- Goodwill first: it reads the victim's faction, and the drain comp kills them. -->
+      <li Class="CompProperties_TargetEffect_GoodwillImpact">
+        <goodwillImpact>-200</goodwillImpact>
+      </li>
+      <li Class="BS9000.CompProperties_DrainLance">
+        <packsPerBodySize>6</packsPerBodySize>
+      </li>
+    </comps>
+  </ThingDef>
+
+  <!-- BG-9555 Hemogen Tank. CompApparelReloadable with HemogenPack as its ammo gives
+       the storage and the manual refill with no code; the mod only adds what pulls
+       hemogen back out again. -->
+  <ThingDef ParentName="ApparelNoQualityBase">
+    <defName>BG9555_HemogenTank</defName>
+    <label>BG-9555 hemogen tank</label>
+    <description>A pressurized liquid storage pack worn on the back, built to keep hemogen on the field instead of in a freezer. A sanguophage wearing one is topped up from the tank automatically, and medics draw on it to transfuse the wounded without a trip to the stockpile.\n\nThe tank has no intake of its own. It is refilled by hand, one hemogen pack at a time.</description>
+    <descriptionHyperlinks>
+      <ThingDef>HemogenPack</ThingDef>
+    </descriptionHyperlinks>
+    <graphicData>
+      <texPath>Things/Item/BS9000/HemogenTank</texPath>
+      <graphicClass>Graphic_Single</graphicClass>
+    </graphicData>
+    <techLevel>Industrial</techLevel>
+    <tickerType>Normal</tickerType>
+    <thingCategories>
+      <li>ApparelUtility</li>
+    </thingCategories>
+    <statBases>
+      <Mass>4</Mass>
+      <EquipDelay>2</EquipDelay>
+      <MaxHitPoints>100</MaxHitPoints>
+      <WorkToMake>9000</WorkToMake>
+      <Flammability>0.4</Flammability>
+    </statBases>
+    <costList>
+      <Steel>50</Steel>
+      <ComponentIndustrial>3</ComponentIndustrial>
+    </costList>
+    <recipeMaker>
+      <unfinishedThingDef>UnfinishedPack</unfinishedThingDef>
+      <researchPrerequisite>BS9000</researchPrerequisite>
+      <recipeUsers>
+        <li>FabricationBench</li>
+      </recipeUsers>
+      <useIngredientsForColor>false</useIngredientsForColor>
+      <workSpeedStat>GeneralLaborSpeed</workSpeedStat>
+      <workSkill>Crafting</workSkill>
+      <effectWorking>Smith</effectWorking>
+      <soundWorking>Recipe_Smith</soundWorking>
+      <skillRequirements>
+        <Crafting>5</Crafting>
+      </skillRequirements>
+      <displayPriority>321</displayPriority>
+    </recipeMaker>
+    <apparel>
+      <countsAsClothingForNudity>false</countsAsClothingForNudity>
+      <scoreOffset>4</scoreOffset>
+      <careIfWornByCorpse>false</careIfWornByCorpse>
+      <wearPerDay>0</wearPerDay>
+      <!-- Torso on the Belt layer is the pack slot: it leaves Waist free for belts and
+           for the drain lance. This is what Packs Are Not Belts does to the vanilla packs. -->
+      <bodyPartGroups>
+        <li>Torso</li>
+      </bodyPartGroups>
+      <layers>
+        <li>Belt</li>
+      </layers>
+      <tags>
+        <li>BS9000_HemogenTank</li>
+      </tags>
+      <wornGraphicPath>Things/Pawn/Humanlike/Apparel/HemogenTank/HemogenTank</wornGraphicPath>
+      <wornGraphicData>
+        <renderUtilityAsPack>true</renderUtilityAsPack>
+        <east>
+          <offset>(-0.35,-0.05)</offset>
+          <thin><offset>(0.05,0)</offset></thin>
+          <hulk><offset>(-0.1,0)</offset></hulk>
+          <fat><offset>(-0.15,0)</offset></fat>
+        </east>
+        <west>
+          <offset>(0.35,-0.05)</offset>
+          <thin><offset>(-0.05,0)</offset></thin>
+          <hulk><offset>(0.1,0)</offset></hulk>
+          <fat><offset>(0.15,0)</offset></fat>
+        </west>
+        <male>  <scale>(0.75,0.75)</scale></male>
+        <female><scale>(0.75,0.75)</scale></female>
+        <thin>  <scale>(0.7,0.7)</scale></thin>
+        <hulk>  <scale>(0.9,0.9)</scale></hulk>
+        <fat>   <scale>(0.9,0.9)</scale></fat>
+      </wornGraphicData>
+    </apparel>
+    <tradeTags>
+      <li>ExoticMisc</li>
+    </tradeTags>
+    <tradeNeverStack>true</tradeNeverStack>
+    <relicChance>0</relicChance>
+    <comps>
+      <li Class="CompProperties_ApparelReloadable">
+        <maxCharges>10</maxCharges>
+        <ammoDef>HemogenPack</ammoDef>
+        <ammoCountPerCharge>1</ammoCountPerCharge>
+        <baseReloadTicks>120</baseReloadTicks>
+        <soundReload>Standard_Reload</soundReload>
+        <destroyOnEmpty>false</destroyOnEmpty>
+        <hotKey>Misc4</hotKey>
+        <chargeNoun>hemogen pack</chargeNoun>
+        <displayGizmoWhileUndrafted>true</displayGizmoWhileUndrafted>
+      </li>
+      <li Class="BS9000.CompProperties_HemogenTank">
+        <hemogenPerPack>0.2</hemogenPerPack>
+        <bloodLossPerPack>0.25</bloodLossPerPack>
+        <minBloodLossToTreat>0.25</minBloodLossToTreat>
+      </li>
+    </comps>
+  </ThingDef>
+
+  <JobDef>
+    <defName>BS9000_TankTransfuse</defName>
+    <driverClass>BS9000.JobDriver_TankTransfuse</driverClass>
+    <reportString>transfusing hemogen into TargetA.</reportString>
+    <casualInterruptible>false</casualInterruptible>
+  </JobDef>
+
+  <WorkGiverDef>
+    <defName>BS9000_TankTransfuse</defName>
+    <label>transfuse hemogen from tank</label>
+    <giverClass>BS9000.WorkGiver_TankTransfuse</giverClass>
+    <workType>Doctor</workType>
+    <verb>transfuse hemogen into</verb>
+    <gerund>transfusing hemogen into</gerund>
+    <!-- Just above the vanilla FeedHemogen giver at 65, so a worn tank is spent
+         before a carrier walks to the stockpile for a loose pack. -->
+    <priorityInType>66</priorityInType>
+    <requiredCapacities>
+      <li>Manipulation</li>
+    </requiredCapacities>
+    <prioritizeSustains>true</prioritizeSustains>
+  </WorkGiverDef>
+
   <ThoughtDef>
     <defName>BS9000_Hemorrhoids</defName>
     <thoughtClass>Thought_Memory</thoughtClass>

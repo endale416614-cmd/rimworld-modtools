@@ -6,7 +6,7 @@
     <li>Adrawerer</li>
   </authors>
   <packageId>local.hemogen.tap</packageId>
-  <modVersion>1.1.0</modVersion>
+  <modVersion>1.2.0</modVersion>
   <supportedVersions>
     <li>1.6</li>
     <li>1.7</li>
@@ -16,6 +16,12 @@
 Research Bloodsucker 9000 after Bionics, craft it at a fabrication bench, install it by surgery. A toggle on the pawn's command bar turns it off and on.
 
 While installed: +15% pain, movement 70%. Each tap: bite sound, blood splash, a -15 mood for a day (+15 for masochists). Blood loss stays below the severe stage, so the implant cannot kill by itself.
+
+The same research also unlocks two pieces of field gear at the fabrication bench.
+
+BS-7500 Drain Lance. A disposable compliance tool. Aim it at a person inside 8 tiles, wait out the long warmup, and it empties them into six hemogen packs and tears itself apart. It works on anyone who bleeds, standing or downed, and the faction it belonged to will notice. Worn on the belt.
+
+BG-9555 Hemogen Tank. A backpack holding ten hemogen packs, refilled by hand. A sanguophage wearing one is topped up automatically, down to the threshold set on their own hemogen bar, and doctors draw on a worn tank to transfuse hemogenic colonists and anyone bleeding badly, without hauling a pack from the stockpile. Worn on the torso, so it stacks with a belt.
 
 Requires Biotech. No Harmony. Safe to add to an existing save; remove the implants by surgery before removing the mod.</description>
   <modDependencies>

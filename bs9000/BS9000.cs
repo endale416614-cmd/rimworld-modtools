@@ -65,6 +65,7 @@ namespace BS9000
         public static EffecterDef BS9000_Bite;
         public static ThoughtDef BS9000_Hemorrhoids;
         public static ThoughtDef BS9000_Masochist;
+        public static JobDef BS9000_TankTransfuse;
 
         static BS9000DefOf() => DefOfHelper.EnsureInitializedInCtor(typeof(BS9000DefOf));
     }
