@@ -1,7 +1,7 @@
 # Runs the test-only probe build of LP17 Hotfix (probe\Probe.cs): swaps the DLL in, turns dev mode on, launches,
 # waits for "[PROBE] done", kills the game, then restores the DLL and Prefs.xml. Saves nothing to the save folder.
 param(
-    [Parameter(Mandatory)][ValidateSet('static', 'soak', 'dump', 'gear', 'scan', 'autoresearch', 'hemogentap', 'bs9000gif', 'newgame', 'select', 'conflicts', 'landmark', 'sitepage')][string]$Mode,
+    [Parameter(Mandatory)][ValidateSet('static', 'soak', 'dump', 'gear', 'scan', 'autoresearch', 'hemogentap', 'bs9000gif', 'newgame', 'select', 'conflicts', 'landmark', 'sitepage', 'aspiration')][string]$Mode,
     [string]$Save = '',
     [Parameter(Mandatory)][string]$OutLog,
     [string]$OutTable = '',
@@ -22,6 +22,9 @@ if (Get-Process -Name RimWorld -ErrorAction SilentlyContinue) { 'RimWorld alread
 # With no workshop items (Steam on another account) Harmony is missing, the load fails and the game resets ModsConfig.xml.
 $subs = Select-String -Path 'F:\Steam\logs\workshop_log.txt' -Pattern '\[AppID 294100\].*Number of items: (\d+)' | Select-Object -Last 1
 if ($subs -and [int]$subs.Matches[0].Groups[1].Value -eq 0) { 'Steam account has no RimWorld subscriptions; not starting'; exit 4 }
+# With the Steam client closed, workshop mods do not mount: a run on 2026-11-17 lost 299 of 555 mods that way and
+# logged 10096 errors that looked like real defects. The subscription check above does not catch it.
+if (-not (Get-Process -Name steam -ErrorAction SilentlyContinue)) { 'Steam client is not running; workshop mods would not load; not starting'; exit 5 }
 $modsConfig = Join-Path $userDir 'Config\ModsConfig.xml'
 $modsConfigText = [IO.File]::ReadAllBytes($modsConfig)
 $prefsText = [IO.File]::ReadAllBytes($prefs)
@@ -60,7 +63,19 @@ try {
 finally {
     [IO.File]::WriteAllBytes($prefs, $prefsText)
     [IO.File]::WriteAllBytes($modsConfig, $modsConfigText)
-    [IO.File]::WriteAllBytes($live, $liveDll)
+    # The game can still hold the DLL for a while after Stop-Process. Without the retry the write
+    # throws, the rest of this block never runs, and the probe build stays live. Report on stdout,
+    # not Write-Warning: the warning stream is dropped when this script is run nested, so a failed
+    # restore looked like a clean run and the next run then "restored" the probe build.
+    $liveOk = $false
+    for ($i = 0; $i -lt 30; $i++) {
+        try {
+            [IO.File]::WriteAllBytes($live, $liveDll)
+            if ([IO.File]::ReadAllBytes($live).Length -eq $liveDll.Length) { $liveOk = $true; break }
+        } catch { Start-Sleep -Seconds 2 }
+    }
+    if ($liveOk) { "RESTORED $live ($($liveDll.Length) bytes)" }
+    else { "RESTORE-FAILED $live is still the probe build; copy the normal build back before playing" }
     if ($null -ne $fixesText) { [IO.File]::WriteAllBytes($fixes, $fixesText) } elseif (Test-Path $fixes) { Remove-Item $fixes }
 }
 "VERDICT $verdict after $([int]((Get-Date) - $start).TotalSeconds)s"

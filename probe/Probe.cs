@@ -19,8 +19,8 @@
 //            control, then make a temporary save (deleted right after).
 //   conflicts : load LP17_PROBE_SAVE, check the mod conflict fixes (nutrient paste dispenser toils, gear row hiding, flare shield and Genetron, turret cast source),
 //            then unpatch them and repeat as a control that must show the opposite. It changes settings and spawns things in memory only, undoes them, and saves nothing.
-//   landmark : needs Odyssey. On the current map's tile, set a deterministic landmark through the "Set landmark" float menu, check its required mutators land on the tile, remove it through "Remove landmark", check the mutators are stripped, then restore the old landmark in memory. Saves nothing.
-//   sitepage : from the main menu, open the real Select Starting Site page of a new Crashlanded game, check the Set landmark gizmo is in the world gizmo grid drawn on that page, and screenshot it. Saves nothing and creates no colony.
+//   landmark : needs Odyssey. On the current map's tile, open the tile editor from the "Edit tile" gizmo, check both tabs list every landmark def and every tile mutator def with their defNames, let it draw, set a deterministic landmark, check its required mutators land on the tile, check validity is still judged on an empty tile, remove the landmark and check every mutator it added is stripped, then remove and restore a world-generated feature and add and remove a modded one, close the window and restore the old landmark in memory. Saves nothing.
+//   sitepage : from the main menu, open the real Select Starting Site page of a new Crashlanded game, check the Edit tile gizmo is in the world gizmo grid drawn on that page, and screenshot it. Saves nothing and creates no colony.
 // Every mode also writes exceptions that were thrown, caught or not, to LP17_PROBE_OUT.exceptions.tsv.
 // Every line starts with [PROBE so harness/proberun.ps1 can attribute errors to the step before them.
 using System;
@@ -55,7 +55,7 @@ namespace LP17Hotfix
             AppDomain.CurrentDomain.FirstChanceException += (s, e) => CountException(e.Exception);
             if (mode == "static" || mode == "dump") new Harmony("local.lp17.probe").Patch(AccessTools.Method(typeof(Root_Entry), "Update"), postfix: new HarmonyMethod(typeof(Probe), nameof(MenuFrame)));
             else if (mode == "sitepage") new Harmony("local.lp17.probe").Patch(AccessTools.Method(typeof(Root_Entry), "Update"), postfix: new HarmonyMethod(typeof(Probe), nameof(SitePageFrame)));
-            else if (mode == "soak" || mode == "gear" || mode == "scan" || mode == "autoresearch" || mode == "hemogentap" || mode == "bs9000gif" || mode == "newgame" || mode == "select" || mode == "conflicts" || mode == "landmark")
+            else if (mode == "soak" || mode == "gear" || mode == "scan" || mode == "autoresearch" || mode == "hemogentap" || mode == "bs9000gif" || mode == "newgame" || mode == "select" || mode == "conflicts" || mode == "landmark" || mode == "aspiration")
             {
                 Harmony h = new Harmony("local.lp17.probe");
                 h.Patch(AccessTools.Method(typeof(Autosaver), "AutosaverTick"), prefix: new HarmonyMethod(typeof(Probe), nameof(No)));
@@ -371,7 +371,7 @@ namespace LP17Hotfix
             Log.ResetMessageCount();
             foreach (Window w in Find.WindowStack.Windows.ToList())
                 if (w.forcePause || w is Dialog_MessageBox || filming) w.Close(false);
-            if (run == null) { Log.Message("[PROBE] playing"); run = (mode == "gear" ? Gear() : mode == "scan" ? Scan() : mode == "autoresearch" ? AutoResearchTest() : mode == "hemogentap" ? BS9000Test() : mode == "bs9000gif" ? Bs9000Gif() : mode == "newgame" ? NewGameTest() : mode == "select" ? SelectTest() : mode == "conflicts" ? ConflictsTest() : mode == "landmark" ? LandmarkTest() : Soak()).GetEnumerator(); }
+            if (run == null) { Log.Message("[PROBE] playing"); run = (mode == "gear" ? Gear() : mode == "scan" ? Scan() : mode == "autoresearch" ? AutoResearchTest() : mode == "hemogentap" ? BS9000Test() : mode == "bs9000gif" ? Bs9000Gif() : mode == "newgame" ? NewGameTest() : mode == "select" ? SelectTest() : mode == "conflicts" ? ConflictsTest() : mode == "landmark" ? LandmarkTest() : mode == "aspiration" ? AspirationTest() : Soak()).GetEnumerator(); }
             Stopwatch sw = Stopwatch.StartNew();
             try
             {
@@ -1089,6 +1089,8 @@ namespace LP17Hotfix
             foreach (int x in Natural("normal", TimeSpeed.Normal, 30)) yield return x;
             foreach (int x in Natural("fast", TimeSpeed.Fast, 30)) yield return x;
             foreach (int x in Natural("superfast", TimeSpeed.Superfast, 30)) yield return x;
+            // The fourth speed the time controls offer. Its multiplier is read from the tps this logs, not assumed.
+            foreach (int x in Natural("ultra", TimeSpeed.Ultrafast, 30)) yield return x;
             Find.TickManager.CurTimeSpeed = TimeSpeed.Paused;
             Mark("wrap");
             Guard("wrap", () => TimeAll(map));
@@ -1185,7 +1187,10 @@ namespace LP17Hotfix
             bool NoDialog(ResearchProjectDef d) => ((System.Collections.ICollection)missingMemes.Invoke(null, new object[] { d })).Count == 0;
 
             Expect(auto != null, "component added to a save made without the mod");
-            Expect(!auto.On, "off by default");
+            // A save with auto research already on cannot show the default, and the faked click below would turn it off and
+            // leave every pick check with nothing to watch. Toggle only flips the flag off, so no scan runs here.
+            if (auto.On) { auto.Toggle(); Log.Message("[PROBE] save had auto research on; turned it off for the test"); }
+            Expect(!auto.On, "off before the click");
 
             Mark("open tab");
             Find.MainTabsRoot.SetCurrentTab(MainButtonDefOf.Research);
@@ -1320,6 +1325,7 @@ namespace LP17Hotfix
             Expect(active, "mod local.hemogen.tap is active");
             // The mod's types are only used inside BS9000Run, so an inactive mod ends the run with a FAIL instead of a step that throws.
             if (active) foreach (int x in BS9000Run()) yield return x;
+            if (active) foreach (int x in BS9000GearRun()) yield return x;
             Log.Message($"[PROBE] hemogen tap failures: {autoFails}");
         }
 
@@ -1405,7 +1411,388 @@ namespace LP17Hotfix
             pawn.health.RemoveHediff(pawn.health.hediffSet.GetFirstHediffOfDef(tap));
         }
 
-        // ---- Landmark Editor: the Set and Remove landmark gizmos, driven through the real float menu ----
+        // Spawns a throwaway adult to drain or to treat. Everything it touches lives in memory only.
+        static Pawn SpawnTestSubject(Map map, IntVec3 near)
+        {
+            Pawn p = PawnGenerator.GeneratePawn(new PawnGenerationRequest(
+                PawnKindDef.Named("Villager"), null, PawnGenerationContext.NonPlayer,
+                forceGenerateNewPawn: true, canGeneratePawnRelations: false,
+                developmentalStages: DevelopmentalStage.Adult));
+            GenSpawn.Spawn(p, CellFinder.RandomClosewalkCellNear(near, map, 6), map);
+            return p;
+        }
+
+        // ---- BS-7500 Drain Lance and BG-9555 Hemogen Tank ----
+
+        static IEnumerable<int> BS9000GearRun()
+        {
+            Mark("gear defs");
+            ThingDef lanceDef = DefDatabase<ThingDef>.GetNamedSilentFail("BS7500_DrainLance");
+            ThingDef tankDef = DefDatabase<ThingDef>.GetNamedSilentFail("BG9555_HemogenTank");
+            Expect(lanceDef != null, "thing def BS7500_DrainLance is loaded");
+            Expect(tankDef != null, "thing def BG9555_HemogenTank is loaded");
+            if (lanceDef == null || tankDef == null) yield break;
+
+            ResearchProjectDef proj = DefDatabase<ResearchProjectDef>.GetNamedSilentFail("BS9000");
+            foreach (ThingDef d in new[] { lanceDef, tankDef })
+            {
+                RecipeDef r = DefDatabase<RecipeDef>.GetNamedSilentFail("Make_" + d.defName);
+                Expect(r != null, "recipe Make_" + d.defName + " exists");
+                Expect(r != null && r.researchPrerequisite == proj, "recipe Make_" + d.defName + " needs research project BS9000");
+                Expect(r?.recipeUsers != null && r.recipeUsers.Any(x => x.defName == "FabricationBench"), "recipe Make_" + d.defName + " is made at the fabrication bench");
+                Expect(proj != null && proj.UnlockedDefs.Contains(d), "research project BS9000 unlocks " + d.defName);
+            }
+            yield return 1;
+
+            Mark("gear slots");
+            Expect(lanceDef.apparel.layers.Any(x => x.defName == "Belt") && lanceDef.apparel.bodyPartGroups.Any(x => x.defName == "Waist"),
+                "lance sits on the utility layer at the waist");
+            Expect(tankDef.apparel.layers.Any(x => x.defName == "Belt") && tankDef.apparel.bodyPartGroups.Any(x => x.defName == "Torso"),
+                "tank sits on the utility layer at the torso");
+            Expect(ApparelUtility.CanWearTogether(lanceDef, tankDef, BodyDefOf.Human), "lance and tank can be worn together");
+            yield return 1;
+
+            Mark("gear textures");
+            // Ground textures are Graphic_Single and need the base file only. Worn overlays are read
+            // as a Graphic_Multi, so those need every direction on disk. The lance is worn from its
+            // own item texture, as the vanilla lances are, so that path is in both lists.
+            foreach (string path in new[] { lanceDef.graphicData.texPath, tankDef.graphicData.texPath })
+                Expect(ContentFinder<UnityEngine.Texture2D>.Get(path, false) != null, "ground texture loads: " + path);
+
+            foreach (string path in new[] { lanceDef.apparel.wornGraphicPath, tankDef.apparel.wornGraphicPath })
+            {
+                Expect(ContentFinder<UnityEngine.Texture2D>.Get(path, false) != null, "worn texture loads: " + path);
+                foreach (string dir in new[] { "_north", "_south", "_east" })
+                    Expect(ContentFinder<UnityEngine.Texture2D>.Get(path + dir, false) != null, "worn texture loads: " + path + dir);
+            }
+            Expect(lanceDef.graphic != null, "lance graphic resolves");
+            Expect(tankDef.graphic != null, "tank graphic resolves");
+            yield return 1;
+
+            Pawn user = Find.CurrentMap.mapPawns.FreeColonistsSpawned.FirstOrDefault(x => !x.Dead && x.IsColonistPlayerControlled && !x.DevelopmentalStage.Baby());
+            Expect(user != null, "a colonist to carry the gear");
+            if (user == null) yield break;
+            Map map = user.MapHeld;
+
+            Mark("drain lance");
+            Apparel lance = (Apparel)ThingMaker.MakeThing(lanceDef);
+            CompApparelReloadable lanceCharges = lance.GetComp<CompApparelReloadable>();
+            Expect(lanceCharges != null && lanceCharges.RemainingCharges == 1, "a new lance carries one charge");
+            BS9000.CompTargetEffect_DrainLance drain = lance.GetComp<BS9000.CompTargetEffect_DrainLance>();
+            Expect(drain != null, "lance carries the drain comp");
+            if (lanceCharges == null || drain == null) yield break;
+            user.apparel.Wear(lance, false);
+            Expect(user.apparel.WornApparel.Contains(lance), "the colonist wears the lance");
+
+            Pawn victim = SpawnTestSubject(map, user.Position);
+            int packsBefore = Packs(map);
+            int expectedPacks = UnityEngine.Mathf.Max(1, UnityEngine.Mathf.RoundToInt(6f * victim.BodySize));
+            drain.DoEffectOn(user, victim);
+            int packsAfter = Packs(map);
+            Log.Message($"[PROBE] drain lance on {victim.LabelShort} (body size {victim.BodySize:F2}): dead {victim.Dead}, packs {packsBefore} -> {packsAfter}, expected +{expectedPacks}");
+            Expect(victim.Dead, "the drained subject dies");
+            Expect(packsAfter == packsBefore + expectedPacks, $"the drain yields {expectedPacks} hemogen packs");
+            yield return 1;
+
+            Mark("lance breaks");
+            // The verb spends the charge after running the comps, so this is what the verb does next.
+            lanceCharges.UsedOnce();
+            Expect(lance.Destroyed, "the lance breaks once its charge is spent");
+            Expect(!user.apparel.WornApparel.Contains(lance), "the broken lance leaves the colonist");
+            yield return 1;
+
+            Mark("tank storage");
+            Apparel tank = (Apparel)ThingMaker.MakeThing(tankDef);
+            CompApparelReloadable tankCharges = tank.GetComp<CompApparelReloadable>();
+            BS9000.Comp_HemogenTank tankComp = tank.GetComp<BS9000.Comp_HemogenTank>();
+            Expect(tankCharges != null && tankComp != null, "tank carries the reloadable and tank comps");
+            if (tankCharges == null || tankComp == null) yield break;
+            Expect(tankCharges.MaxCharges == 10, "the tank holds ten packs");
+            Expect(tankCharges.RemainingCharges == tankCharges.MaxCharges, "a new tank starts full");
+            Expect(tankCharges.AmmoDef == ThingDefOf.HemogenPack, "the tank is refilled with hemogen packs");
+            user.apparel.Wear(tank, false);
+            Expect(BS9000.HemogenTankUtility.WornTank(user) == tankComp, "a worn tank with charges is found on the wearer");
+            yield return 1;
+
+            Mark("tank treats blood loss");
+            Pawn patient = SpawnTestSubject(map, user.Position);
+            HealthUtility.AdjustSeverity(patient, HediffDefOf.BloodLoss, 0.4f);
+            float lossBefore = BloodLoss(patient);
+            int chargesBefore = tankCharges.RemainingCharges;
+            bool treated = BS9000.HemogenTankUtility.Transfuse(tankComp, patient);
+            Log.Message($"[PROBE] tank transfuse on {patient.LabelShort}: ok {treated}, charges {chargesBefore} -> {tankCharges.RemainingCharges}, blood loss {lossBefore:F3} -> {BloodLoss(patient):F3}");
+            Expect(treated, "transfusing a bleeding patient succeeds");
+            Expect(tankCharges.RemainingCharges == chargesBefore - 1, "the transfusion spends one charge");
+            Expect(BloodLoss(patient) < lossBefore - 0.2f, "the transfusion cuts blood loss");
+            yield return 1;
+
+            Mark("tank leaves the healthy alone");
+            Pawn healthy = SpawnTestSubject(map, user.Position);
+            int chargesHeld = tankCharges.RemainingCharges;
+            bool wasted = BS9000.HemogenTankUtility.Transfuse(tankComp, healthy);
+            Expect(!wasted, "a patient who needs nothing is not transfused");
+            Expect(tankCharges.RemainingCharges == chargesHeld, "no charge is spent on a patient who needs nothing");
+            yield return 1;
+
+            Mark("tank tops up hemogen");
+            GeneDef hemogenic = DefDatabase<GeneDef>.GetNamedSilentFail("Hemogenic");
+            Expect(hemogenic != null, "gene def Hemogenic exists");
+            if (hemogenic != null && healthy.genes != null)
+            {
+                healthy.genes.AddGene(hemogenic, true);
+                Gene_Hemogen gene = healthy.genes.GetFirstGeneOfType<Gene_Hemogen>();
+                Expect(gene != null, "the test subject carries the hemogen gene");
+                if (gene != null)
+                {
+                    gene.Value = 0f;
+                    gene.SetTargetValuePct(0.5f);
+                    Expect(BS9000.HemogenTankUtility.WantsHemogen(healthy), "an empty hemogenic pawn wants hemogen");
+                    int chargesNow = tankCharges.RemainingCharges;
+                    bool fed = BS9000.HemogenTankUtility.Transfuse(tankComp, healthy);
+                    Log.Message($"[PROBE] tank hemogen on {healthy.LabelShort}: ok {fed}, charges {chargesNow} -> {tankCharges.RemainingCharges}, hemogen {gene.Value:F3}, target {gene.targetValue:F3}");
+                    Expect(fed && tankCharges.RemainingCharges == chargesNow - 1, "the tank spends a charge on hemogen");
+                    Expect(gene.Value > 0f, "the hemogen lands on the pawn");
+
+                    // The threshold on the hemogen bar is what stops a pawn being topped up forever.
+                    gene.Value = gene.Max;
+                    Expect(!BS9000.HemogenTankUtility.WantsHemogen(healthy), "a pawn above the threshold wants nothing");
+                    int chargesFull = tankCharges.RemainingCharges;
+                    BS9000.HemogenTankUtility.Transfuse(tankComp, healthy);
+                    Expect(tankCharges.RemainingCharges == chargesFull, "no charge is spent above the threshold");
+                }
+            }
+            yield return 1;
+
+            Mark("transfuse work giver");
+            BS9000.WorkGiver_TankTransfuse giver = new BS9000.WorkGiver_TankTransfuse();
+            Expect(!giver.ShouldSkip(user), "the giver runs for a pawn wearing a charged tank");
+            Expect(!giver.HasJobOnThing(user, user), "the giver does not offer a job on the worker themself");
+
+            // The case the giver exists for: downed, and bleeding past the treatment threshold.
+            Pawn casualty = SpawnTestSubject(map, user.Position);
+            HealthUtility.DamageUntilDowned(casualty, false);
+            HealthUtility.AdjustSeverity(casualty, HediffDefOf.BloodLoss, 0.5f);
+            bool offers = false;
+            Job offered = null;
+            Guard("work giver scan", () => offers = giver.HasJobOnThing(user, casualty, true));
+            Guard("work giver job", () => offered = giver.JobOnThing(user, casualty, true));
+            Log.Message($"[PROBE] transfuse giver on {casualty.LabelShort}: downed {casualty.Downed}, blood loss {BloodLoss(casualty):F3}, offered {offers}, job {(offered?.def?.defName ?? "none")}");
+            Expect(offers, "the giver offers a job on a downed bleeding patient");
+            Expect(offered != null && offered.def.defName == "BS9000_TankTransfuse", "the job is BS9000_TankTransfuse on that patient");
+            Expect(offered == null || offered.targetA.Thing == casualty, "the job targets the patient");
+
+            // An empty tank must stop the giver, or doctors queue work the tank cannot pay for.
+            int held = tankCharges.RemainingCharges;
+            for (int i = 0; i < held; i++) tankCharges.UsedOnce();
+            Expect(tankCharges.RemainingCharges == 0, "the tank can be emptied");
+            Expect(giver.ShouldSkip(user), "an empty tank stops the giver");
+            Expect(!giver.HasJobOnThing(user, casualty, true), "an empty tank offers no job");
+            yield return 1;
+
+            Mark("gear cleanup");
+            if (!tank.Destroyed)
+            {
+                if (user.apparel.WornApparel.Contains(tank)) user.apparel.Remove(tank);
+                tank.Destroy();
+            }
+            foreach (Pawn p in new[] { victim, patient, healthy, casualty })
+            {
+                if (p != null && !p.Destroyed) p.Destroy();
+            }
+            yield return 1;
+        }
+
+        // ---- Landmark Editor: the tile gizmo and the editor window it opens ----
+
+        // Draws the fulfillment need at the sizes the vanilla needs tab and the character editor use,
+        // so the patched draw path is exercised inside a real OnGUI pass.
+        class NeedDrawWindow : Verse.Window
+        {
+            public Need need;
+            public int errors;
+            public int frames;
+            public string lastError;
+
+            static readonly float[] widths = { 290f, 200f, 420f, 290f };
+            static readonly float[] heights = { 60f, 60f, 70f, 40f };
+
+            public NeedDrawWindow()
+            {
+                doCloseX = true;
+                closeOnClickedOutside = false;
+                draggable = true;
+            }
+
+            public override UnityEngine.Vector2 InitialSize => new UnityEngine.Vector2(480f, 320f);
+
+            public override void DoWindowContents(UnityEngine.Rect inRect)
+            {
+                frames++;
+                float y = 0f;
+                for (int i = 0; i < widths.Length; i++)
+                {
+                    try
+                    {
+                        need.DrawOnGUI(new UnityEngine.Rect(inRect.x, inRect.y + y, widths[i], heights[i]),
+                            int.MaxValue, -1f, true, true, null, true);
+                    }
+                    catch (Exception e)
+                    {
+                        errors++;
+                        lastError = e.GetType().Name + ": " + First(e.Message);
+                    }
+                    y += heights[i] + 6f;
+                }
+            }
+        }
+
+        static IEnumerable<int> AspirationTest()
+        {
+            foreach (int x in AspirationRun()) yield return x;
+            Log.Message($"[PROBE] aspiration failures: {autoFails}");
+        }
+
+        static string AspirationState(object need)
+        {
+            var list = (System.Collections.IList)AccessTools.Field(need.GetType(), "Aspirations").GetValue(need);
+            var ticks = (System.Collections.IList)AccessTools.Field(need.GetType(), "completedTicks").GetValue(need);
+            var parts = new List<string>();
+            for (int i = 0; i < list.Count; i++) parts.Add(((Def)list[i]).defName + "~" + (i < ticks.Count ? ticks[i] : (object)"?"));
+            return string.Join(",", parts.ToArray());
+        }
+
+        static IEnumerable<int> AspirationRun()
+        {
+            Find.TickManager.CurTimeSpeed = TimeSpeed.Paused;
+            Type patch = AccessTools.TypeByName("AspirationControl.Need_Fulfillment_DrawOnGUI_Patch");
+            Expect(patch != null, "Aspiration Control assembly is loaded");
+            if (patch == null) yield break;
+
+            // 1. The split of the need's rect. Every combination must stay inside the rect it was given,
+            // which is the whole point of the patch: the stock strip hangs below it.
+            Mark("layout");
+            MethodInfo layout = AccessTools.Method(patch, "Layout");
+            Expect(layout != null, "the patch exposes Layout");
+            if (layout == null) yield break;
+            float minBar = (float)AccessTools.Field(patch, "MinBarHeight").GetValue(null);
+            int cases = 0, outside = 0, mismatched = 0, thinBar = 0, fitted = 0;
+            string firstBad = null;
+            foreach (float w in new float[] { 90f, 120f, 180f, 240f, 290f, 420f, 600f })
+                foreach (float h in new float[] { 20f, 30f, 40f, 54f, 60f, 70f, 90f, 120f })
+                    foreach (int n in new int[] { 0, 1, 2, 3, 4, 5 })
+                        foreach (float m in new float[] { -1f, 0f, 10f, 29f })
+                        {
+                            cases++;
+                            var rect = new UnityEngine.Rect(17f, 23f, w, h);
+                            var args = new object[] { rect, m, n, null, null };
+                            bool ok = (bool)layout.Invoke(null, args);
+                            var bar = (UnityEngine.Rect)args[3];
+                            var strip = (UnityEngine.Rect)args[4];
+                            if (!ok)
+                            {
+                                if (bar != rect) { mismatched++; firstBad = firstBad ?? ("no-split keeps the rect w" + w + " h" + h + " n" + n + " m" + m); }
+                                continue;
+                            }
+                            fitted++;
+                            bool inside = strip.xMin >= rect.xMin - 0.01f && strip.xMax <= rect.xMax + 0.01f
+                                && strip.yMin >= rect.yMin - 0.01f && strip.yMax <= rect.yMax + 0.01f;
+                            if (!inside) { outside++; firstBad = firstBad ?? ("strip " + strip + " outside " + rect + " n" + n + " m" + m); }
+                            if (UnityEngine.Mathf.Abs(bar.height + strip.height - rect.height) > 0.01f || bar.yMin != rect.yMin || bar.width != rect.width)
+                            { mismatched++; firstBad = firstBad ?? ("bar " + bar + " does not fill the rest of " + rect + " n" + n + " m" + m); }
+                            if (bar.height < minBar - 0.01f) { thinBar++; firstBad = firstBad ?? ("bar height " + bar.height + " under the floor, w" + w + " h" + h + " n" + n + " m" + m); }
+                        }
+            Log.Message("[PROBE] aspiration layout cases " + cases + ", split " + fitted + ", bar-only " + (cases - fitted));
+            Expect(outside == 0, "the icon strip stays inside the need's rect in every case (" + outside + " of " + cases + " outside)");
+            Expect(mismatched == 0, "the bar takes exactly the rest of the rect (" + mismatched + " off)");
+            Expect(thinBar == 0, "the bar never drops under its floor of " + minBar + "px (" + thinBar + " too thin)");
+            Expect(fitted > 0, "a strip fits in the sizes the needs lists use");
+            if (firstBad != null) Log.Message("[PROBE] aspiration layout first bad case: " + firstBad);
+
+            // 2. A live pawn with the need.
+            Mark("pawn");
+            NeedDef needDef = DefDatabase<NeedDef>.GetNamedSilentFail("VAspirE_Fulfillment");
+            Expect(needDef != null, "the fulfillment need def is loaded");
+            if (needDef == null || Find.CurrentMap == null) yield break;
+            Pawn pawn = null;
+            object need = null;
+            foreach (Pawn p in Find.CurrentMap.mapPawns.FreeColonists)
+            {
+                Need n = p.needs?.TryGetNeed(needDef);
+                if (n != null) { pawn = p; need = n; break; }
+            }
+            Expect(pawn != null, "a colonist on the map has the fulfillment need");
+            if (pawn == null) yield break;
+            var aspirations = (System.Collections.IList)AccessTools.Field(need.GetType(), "Aspirations").GetValue(need);
+            var ticks = (System.Collections.IList)AccessTools.Field(need.GetType(), "completedTicks").GetValue(need);
+            Log.Message("[PROBE] aspiration pawn " + pawn.LabelShort + ": " + AspirationState(need));
+            string original = AspirationState(need);
+            Expect(aspirations.Count > 0 && ticks.Count == aspirations.Count, "the pawn has aspirations and one tick per aspiration");
+
+            // 3. Picking an aspiration for a slot.
+            Mark("picker");
+            Type aspDefType = AccessTools.TypeByName("VAspirE.AspirationDef");
+            var allDefs = GenDefDatabase.GetAllDefsInDatabaseForDef(aspDefType).Cast<Def>().ToList();
+            Expect(allDefs.Count > 0, "the aspiration defs are loaded (" + allDefs.Count + ")");
+            Def picked = allDefs.FirstOrDefault(d => !aspirations.Cast<Def>().Contains(d));
+            if (picked == null) yield break;
+            int slots = aspirations.Count;
+            Guard("set aspiration", () => AccessTools.Method(patch, "SetAt").Invoke(null, new object[] { need, 0, picked }));
+            Expect(aspirations.Count == slots && ReferenceEquals(aspirations[0], picked), "picking replaces slot 0 with " + picked.defName + " and adds no slot");
+            Expect(((Need)need).CurLevel == ticks.Cast<int>().Count(t => t != -1), "the need level matches the completed slots after picking");
+
+            Guard("remove aspiration", () => AccessTools.Method(patch, "RemoveAt").Invoke(null, new object[] { need, 0 }));
+            Expect(aspirations.Count == slots - 1 && ticks.Count == slots - 1, "removing a slot drops its aspiration and its tick");
+
+            Guard("add aspiration back", () => AccessTools.Method(patch, "SetAt").Invoke(null, new object[] { need, aspirations.Count, picked }));
+            Expect(aspirations.Count == slots && ReferenceEquals(aspirations[slots - 1], picked), "the empty slot at the end adds an aspiration");
+
+            // 4. The Character Editor preset round trip.
+            Mark("preset round trip");
+            Type ext = AccessTools.TypeByName("CharacterEditor.MindTool");
+            MethodInfo read = ext == null ? null : AccessTools.Method(ext, "GetAllNeedsAsSeparatedString");
+            MethodInfo write = ext == null ? null : AccessTools.Method(ext, "SetNeeds");
+            Expect(read != null && write != null, "Character Editor's needs preset methods are there to patch");
+            if (read == null || write == null) yield break;
+            string saved = (string)read.Invoke(null, new object[] { pawn });
+            Expect(saved != null && saved.Contains("|ASPIRATIONS|"), "the preset string carries the aspirations");
+            string savedState = AspirationState(need);
+
+            // Scramble, then load the preset back.
+            Def other = allDefs.FirstOrDefault(d => !aspirations.Cast<Def>().Contains(d));
+            if (other != null) Guard("scramble", () => AccessTools.Method(patch, "SetAt").Invoke(null, new object[] { need, 1, other }));
+            Guard("drop a slot", () => AccessTools.Method(patch, "RemoveAt").Invoke(null, new object[] { need, 0 }));
+            Expect(AspirationState(need) != savedState, "the pawn's aspirations really changed before the reload");
+            Guard("load preset", () => write.Invoke(null, new object[] { pawn, saved }));
+            Expect(AspirationState(need) == savedState, "loading the preset restores the same aspirations and progress"
+                + (AspirationState(need) == savedState ? "" : ": " + AspirationState(need) + " not " + savedState));
+
+            // A preset written before this mod has no aspiration entry and must still load.
+            string legacy = string.Join(":", saved.Split(':').Where(e => !e.Contains("|ASPIRATIONS|")).ToArray());
+            string beforeLegacy = AspirationState(need);
+            Guard("load preset without aspirations", () => write.Invoke(null, new object[] { pawn, legacy }));
+            Expect(AspirationState(need) == beforeLegacy, "a preset saved before this mod loads and leaves the aspirations alone");
+
+            // 5. The need draws through the real OnGUI path, at the rect sizes the needs lists use.
+            Mark("draw the need");
+            var win = new NeedDrawWindow();
+            win.need = (Need)need;
+            Guard("open the draw window", () => Find.WindowStack.Add(win));
+            for (int i = 0; i < 40; i++) yield return 1;
+            Expect(win.frames > 0, "the draw window ran OnGUI (" + win.frames + " frames)");
+            Expect(win.errors == 0, "the fulfillment need draws without throwing at any size ("
+                + win.errors + (win.lastError == null ? "" : ", " + win.lastError) + ")");
+            Shot("aspiration-need");
+            for (int i = 0; i < 10; i++) yield return 1;
+            Guard("close the draw window", () => win.Close(false));
+
+            // The load warns that English translation data has errors but never says which; write the list out.
+            Mark("translation report");
+            Guard("translation report", () => LanguageReportGenerator.SaveTranslationReport());
+            Log.Message("[PROBE] translation report in " + GenFilePaths.SaveDataFolderPath);
+
+            Mark("restore");
+            Log.Message("[PROBE] aspiration state at the end: " + AspirationState(need) + " (started as " + original + ")");
+        }
 
         static IEnumerable<int> LandmarkTest()
         {
@@ -1419,6 +1806,15 @@ namespace LP17Hotfix
         // Matched by label only, so the mod's assembly is not referenced.
         static List<Command_Action> TileActions(RimWorld.Planet.Tile t) =>
             (t.GetGizmos() ?? Enumerable.Empty<Gizmo>()).OfType<Command_Action>().ToList();
+
+        static Window LandmarkDialog() =>
+            Find.WindowStack.Windows.FirstOrDefault(w => w.GetType().Name == "Dialog_LandmarkEditor");
+
+        static IEnumerable<MutatorChance> AllChances(LandmarkDef def)
+        {
+            if (def.mutatorChances != null) foreach (MutatorChance mc in def.mutatorChances) yield return mc;
+            if (def.comboLandmarkMutators != null) foreach (MutatorChance mc in def.comboLandmarkMutators) yield return mc;
+        }
 
         static IEnumerable<int> LandmarkRun()
         {
@@ -1437,64 +1833,158 @@ namespace LP17Hotfix
             Log.Message($"[PROBE] landmark tile {pt}: current landmark {originalName}");
 
             Mark("gizmos");
-            Command_Action setGizmo = TileActions(t).FirstOrDefault(a => a.defaultLabel == "Set landmark");
-            Expect(setGizmo != null, "Set landmark gizmo present (Harmony postfix applied)");
-            if (setGizmo == null) yield break;
-            bool removeShown = TileActions(t).Any(a => a.defaultLabel == "Remove landmark");
-            bool hasLandmark = t.Landmark != null;
-            Expect(removeShown == hasLandmark, "Remove landmark gizmo shown only when the tile has a landmark (shown " + removeShown + ", landmark " + hasLandmark + ")");
+            List<Command_Action> acts = TileActions(t);
+            Command_Action editGizmo = acts.FirstOrDefault(a => a.defaultLabel == "Edit tile");
+            Expect(editGizmo != null, "Edit tile gizmo present (Harmony postfix applied)");
+            if (editGizmo == null) yield break;
+            int editGizmos = acts.Count(a => a.defaultLabel == "Edit tile");
+            int oldGizmos = acts.Count(a => a.defaultLabel == "Set landmark" || a.defaultLabel == "Remove landmark" || a.defaultLabel == "Edit landmark");
+            Expect(editGizmos == 1 && oldGizmos == 0, "exactly one Edit tile gizmo and none of the older ones (" + editGizmos + " and " + oldGizmos + ")");
+
+            Mark("open the editor");
+            Guard("edit landmark gizmo", () => editGizmo.action());
+            Window dlg = null;
+            foreach (int x in WaitFor(() => (dlg = LandmarkDialog()) != null, 120)) yield return x;
+            Expect(dlg != null, "the gizmo opens the landmark editor window");
+            if (dlg == null) yield break;
+            Type dt = dlg.GetType();
+
+            Mark("the window draws");
+            for (int i = 0; i < 30; i++) yield return 1;
+            Expect(Find.WindowStack.Windows.Contains(dlg), "the editor survives 30 frames of drawing");
+
+            Mark("list contents");
+            List<LandmarkDef> defs = DefDatabase<LandmarkDef>.AllDefsListForReading;
+            var rows = (System.Collections.IList)AccessTools.Field(dt, "landmarkRows").GetValue(dlg);
+            Expect(rows != null && rows.Count == defs.Count, "the editor lists every landmark def (" + (rows == null ? 0 : rows.Count) + " of " + defs.Count + ")");
+            if (rows == null || rows.Count == 0) yield break;
+            Type rowType = rows[0].GetType();
+            FieldInfo fDef = AccessTools.Field(rowType, "def"), fSub = AccessTools.Field(rowType, "sub"), fValid = AccessTools.Field(rowType, "valid");
+            FieldInfo fActive = AccessTools.Field(rowType, "active"), fBlocked = AccessTools.Field(rowType, "blocked");
+            Expect(fDef != null && fSub != null && fValid != null && fActive != null && fBlocked != null, "editor rows expose def, sub, valid, active and blocked");
+            if (fDef == null || fSub == null || fValid == null || fActive == null || fBlocked == null) yield break;
+
+            // Several defs share one label ("lake" covers four), so each row must also carry its defName.
+            var untagged = new List<string>();
+            foreach (object r in rows)
+            {
+                var d = (LandmarkDef)fDef.GetValue(r);
+                var sub = (string)fSub.GetValue(r);
+                if (sub == null || sub.IndexOf(d.defName, StringComparison.Ordinal) < 0) untagged.Add(d.defName);
+            }
+            Expect(untagged.Count == 0, "every row names its defName, so landmarks sharing a label are tellable apart" + (untagged.Count == 0 ? "" : ": missing on " + string.Join(", ", untagged.Take(5))));
 
             Mark("clean slate");
-            if (hasLandmark)
+            if (t.Landmark != null)
             {
-                Command_Action oldRemove = TileActions(t).FirstOrDefault(a => a.defaultLabel == "Remove landmark");
-                if (oldRemove != null) Guard("remove existing landmark", () => oldRemove.action());
+                Guard("remove existing landmark", () => AccessTools.Method(dt, "RemoveLandmark").Invoke(dlg, null));
                 Expect(t.Landmark == null, "existing landmark removed before the test");
             }
 
             Mark("pick def");
-            List<LandmarkDef> defs = DefDatabase<LandmarkDef>.AllDefsListForReading;
-            // Several defs share one label ("lake" covers four), so pick one whose label is unique: the menu entry is then the plain label.
-            var labelCounts = defs.GroupBy(d => d.LabelCap.ToString()).ToDictionary(g => g.Key, g => g.Count());
-            Func<LandmarkDef, bool> usable = d => DeterministicLandmark(d) && labelCounts[d.LabelCap.ToString()] == 1;
-            LandmarkDef chosen = defs.FirstOrDefault(d => d.defName == "Valley" && usable(d)) ?? defs.FirstOrDefault(usable);
-            if (chosen == null) { Expect(false, "no deterministic landmark def with a unique label found"); yield break; }
+            LandmarkDef chosen = defs.FirstOrDefault(d => d.defName == "Valley" && DeterministicLandmark(d)) ?? defs.FirstOrDefault(DeterministicLandmark);
+            if (chosen == null) { Expect(false, "no deterministic landmark def found"); yield break; }
             Log.Message("[PROBE] landmark chosen " + chosen.defName);
-            var expected = chosen.mutatorChances.Where(mc => mc != null && mc.required && mc.chance >= 1f && mc.mutator != null).Select(mc => mc.mutator).ToList();
+            var required = chosen.mutatorChances.Where(mc => mc != null && mc.required && mc.chance >= 1f && mc.mutator != null).Select(mc => mc.mutator).ToList();
+            var before = t.Mutators == null ? new List<TileMutatorDef>() : t.Mutators.ToList();
 
-            Mark("set through the float menu");
-            var menusBefore = Find.WindowStack.Windows.OfType<FloatMenu>().ToList();
-            Guard("set landmark gizmo", () => setGizmo.action());
-            FloatMenu menu = null;
-            foreach (int x in WaitFor(() => (menu = Find.WindowStack.Windows.OfType<FloatMenu>().FirstOrDefault(m => !menusBefore.Contains(m))) != null, 120)) yield return x;
-            Expect(menu != null, "Set landmark opens a float menu");
-            if (menu == null) yield break;
-            string cap = chosen.LabelCap.ToString();
-            var options = (List<FloatMenuOption>)AccessTools.Field(typeof(FloatMenu), "options").GetValue(menu);
-            Expect(options != null && options.Count == defs.Count, "float menu lists every landmark def (" + (options == null ? 0 : options.Count) + " of " + defs.Count + ")");
-            var dupLabels = (options ?? new List<FloatMenuOption>()).GroupBy(o => o.Label).Where(g => g.Count() > 1).Select(g => g.Key).ToList();
-            Expect(dupLabels.Count == 0, "every float menu entry has a distinct label" + (dupLabels.Count == 0 ? "" : ": repeated " + string.Join(", ", dupLabels)));
-            FloatMenuOption pick = options?.FirstOrDefault(o => o.Label == cap || o.Label == cap + " (not normally valid here)");
-            Expect(pick != null, "float menu offers " + cap);
-            if (pick != null) Guard("pick " + cap, () => pick.action());
-            Find.WindowStack.TryRemove(menu, false);
+            // The count on the bare tile. Without it a later zero cannot be told apart from a tile
+            // where nothing fits in the first place.
+            int validBefore = 0;
+            foreach (object r in rows) if ((bool)fValid.GetValue(r)) validBefore++;
+            Log.Message("[PROBE] landmark rows that fit the bare tile: " + validBefore + " of " + rows.Count
+                + "; hilliness " + t.hilliness + ", biome " + (t.PrimaryBiome != null ? t.PrimaryBiome.defName : "none")
+                + ", mutators " + (before.Count == 0 ? "none" : string.Join(", ", before.Select(m => m.defName))));
+
+            Mark("set through the window");
+            Guard("set landmark", () => AccessTools.Method(dt, "SetLandmark").Invoke(dlg, new object[] { chosen }));
             yield return 1;
 
             Mark("set checks");
-            Expect(t.Landmark != null && t.Landmark.def == chosen, "Set landmark makes " + chosen.defName + " the tile's landmark");
+            Expect(t.Landmark != null && t.Landmark.def == chosen, "Set makes " + chosen.defName + " the tile's landmark");
             Expect(t.Landmark != null && !string.IsNullOrEmpty(t.Landmark.name), "new landmark has a name");
             Expect(t.Landmark != null && ReferenceEquals(Find.World.landmarks[pt], t.Landmark), "world landmark table holds the same landmark object");
-            Expect(t.Mutators != null && expected.All(m => t.Mutators.Contains(m)), "required mutators of " + chosen.defName + " are on the tile: " + string.Join(", ", expected.Select(m => m.defName)));
+            Expect(t.Mutators != null && required.All(m => t.Mutators.Contains(m)), "required mutators of " + chosen.defName + " are on the tile: " + string.Join(", ", required.Select(m => m.defName)));
+            var added = AllChances(chosen).Where(mc => mc != null && mc.mutator != null && !before.Contains(mc.mutator) && t.Mutators != null && t.Mutators.Contains(mc.mutator)).Select(mc => mc.mutator).Distinct().ToList();
+            Log.Message("[PROBE] landmark added mutators: " + (added.Count == 0 ? "none" : string.Join(", ", added.Select(m => m.defName))));
 
-            Mark("remove through the gizmo");
-            Command_Action removeGizmo = TileActions(t).FirstOrDefault(a => a.defaultLabel == "Remove landmark");
-            Expect(removeGizmo != null, "Remove landmark gizmo shown after setting a landmark");
-            if (removeGizmo != null) Guard("remove landmark gizmo", () => removeGizmo.action());
+            Mark("validity is judged on an empty tile");
+            var after = (System.Collections.IList)AccessTools.Field(dt, "landmarkRows").GetValue(dlg);
+            int validRows = 0;
+            foreach (object r in after) if ((bool)fValid.GetValue(r)) validRows++;
+            // Compared against the bare tile, not against zero. A quick-test tile can legitimately fit no
+            // landmark at all - a Mountainous Tundra tile carrying Mountain and Caves blocks every mountain
+            // and cave landmark on shared categories and fits none of the rest - and then "more than none"
+            // fails whatever the editor does. What the lift-out owes is that a landmark on the tile changes
+            // nothing: the same defs fit with it as without it.
+            Expect(validRows == validBefore, "a landmark on the tile does not change which landmarks fit ("
+                + validRows + " with it, " + validBefore + " on the bare tile)");
+            Expect(t.Landmark != null && t.Landmark.def == chosen, "the validity pass puts the tile's landmark back");
+
+            Mark("remove through the window");
+            Guard("remove landmark", () => AccessTools.Method(dt, "RemoveLandmark").Invoke(dlg, null));
             yield return 1;
-            Expect(t.Landmark == null, "Remove landmark clears the tile's landmark");
+            Expect(t.Landmark == null, "Remove clears the tile's landmark");
             Expect(Find.World.landmarks[pt] == null, "world landmark table has no entry for the tile");
-            var left = expected.Where(m => t.Mutators != null && t.Mutators.Contains(m)).Select(m => m.defName).ToList();
-            Expect(left.Count == 0, "Remove landmark strips the mutators" + (left.Count == 0 ? "" : ": still on the tile " + string.Join(", ", left)));
+            var left = added.Where(m => t.Mutators != null && t.Mutators.Contains(m)).Select(m => m.defName).ToList();
+            Expect(left.Count == 0, "Remove strips every mutator the landmark added" + (left.Count == 0 ? "" : ": still on the tile " + string.Join(", ", left)));
+
+            Mark("features tab");
+            List<TileMutatorDef> mutDefs = DefDatabase<TileMutatorDef>.AllDefsListForReading;
+            var feats = (System.Collections.IList)AccessTools.Field(dt, "featureRows").GetValue(dlg);
+            Expect(feats != null && feats.Count == mutDefs.Count, "the editor lists every tile feature (" + (feats == null ? 0 : feats.Count) + " of " + mutDefs.Count + ")");
+            if (feats == null || feats.Count == 0) yield break;
+
+            bool orderOk = true, seenInactive = false;
+            foreach (object r in feats)
+            {
+                bool active = (bool)fActive.GetValue(r);
+                if (!active) seenInactive = true;
+                else if (seenInactive) orderOk = false;
+            }
+            Expect(orderOk, "the tile's own features are listed before the rest");
+
+            Mark("remove a feature the tile already had");
+            TileMutatorDef owned = t.Mutators == null ? null : t.Mutators.FirstOrDefault();
+            if (owned == null) Log.Message("[PROBE] landmark: tile has no world-generated feature to remove, step skipped");
+            else
+            {
+                Guard("remove owned feature", () => AccessTools.Method(dt, "ToggleFeature").Invoke(dlg, new object[] { owned }));
+                yield return 1;
+                Expect(t.Mutators == null || !t.Mutators.Contains(owned), "Remove takes the world-generated feature " + owned.defName + " off the tile");
+                Guard("restore owned feature", () => AccessTools.Method(dt, "ToggleFeature").Invoke(dlg, new object[] { owned }));
+                yield return 1;
+                Expect(t.Mutators != null && t.Mutators.Contains(owned), "Add puts " + owned.defName + " back on the tile");
+            }
+
+            Mark("add and remove a feature the tile lacks");
+            var addable = new List<TileMutatorDef>();
+            foreach (object r in (System.Collections.IList)AccessTools.Field(dt, "featureRows").GetValue(dlg))
+                if (!(bool)fActive.GetValue(r) && !(bool)fBlocked.GetValue(r) && (bool)fValid.GetValue(r)) addable.Add((TileMutatorDef)fDef.GetValue(r));
+            // Prefer a modded feature, since those are the ones the editor used to miss.
+            TileMutatorDef feature = addable.FirstOrDefault(d => d.defName == "VEE_DeadlifeVents")
+                ?? addable.FirstOrDefault(d => d.modContentPack != null && !d.modContentPack.IsCoreMod && !d.modContentPack.IsOfficialMod)
+                ?? addable.FirstOrDefault();
+            if (feature == null) Expect(false, "the editor offers at least one feature this tile can take");
+            else
+            {
+                Log.Message("[PROBE] landmark feature chosen " + feature.defName + " from " + (feature.modContentPack == null ? "unknown" : feature.modContentPack.Name));
+                Guard("add feature", () => AccessTools.Method(dt, "ToggleFeature").Invoke(dlg, new object[] { feature }));
+                yield return 1;
+                Expect(t.Mutators != null && t.Mutators.Contains(feature), "Add puts " + feature.defName + " on the tile");
+
+                var featRow = ((System.Collections.IList)AccessTools.Field(dt, "featureRows").GetValue(dlg)).Cast<object>()
+                    .FirstOrDefault(r => ReferenceEquals(fDef.GetValue(r), feature));
+                Expect(featRow != null && (bool)fActive.GetValue(featRow), "the row for " + feature.defName + " now reads as on the tile");
+
+                Guard("remove feature", () => AccessTools.Method(dt, "ToggleFeature").Invoke(dlg, new object[] { feature }));
+                yield return 1;
+                Expect(t.Mutators == null || !t.Mutators.Contains(feature), "Remove takes " + feature.defName + " off the tile");
+            }
+            Mark("close");
+            Guard("close the editor", () => dlg.Close(false));
+            yield return 1;
+            Expect(LandmarkDialog() == null, "the editor closes");
 
             Mark("restore");
             if (original != null) Guard("restore landmark", () => Find.World.landmarks.AddLandmark(original, pt, t.Layer, true));
@@ -1502,7 +1992,7 @@ namespace LP17Hotfix
             Log.Message("[PROBE] landmark restore: " + restored);
         }
 
-        // ---- Select Starting Site: does the Set landmark gizmo reach the world gizmo grid on that page ----
+        // ---- Select Starting Site: does the Edit tile gizmo reach the world gizmo grid on that page ----
 
         static IEnumerator<int> sitePageRun;
         static bool sitePageGizmoDrawn;
@@ -1553,7 +2043,7 @@ namespace LP17Hotfix
             sitePageDraws++;
             sitePageGizmos = objects.OfType<Gizmo>().Count();
             sitePageLabels = string.Join(", ", commands.Select(c => c.defaultLabel));
-            if (commands.Any(c => c.defaultLabel == "Set landmark")) sitePageGizmoDrawn = true;
+            if (commands.Any(c => c.defaultLabel == "Edit tile")) sitePageGizmoDrawn = true;
         }
 
         static IEnumerable<int> SitePageRun()
@@ -1618,7 +2108,7 @@ namespace LP17Hotfix
             if (selected == RimWorld.Planet.PlanetTile.Invalid || selected.Tile == null) { Expect(false, "the selected tile has a world tile to read gizmos from"); yield break; }
 
             List<Command_Action> tileActions = TileActions(selected.Tile);
-            Expect(tileActions.Any(a => a.defaultLabel == "Set landmark"), "the selected tile's gizmos include Set landmark (" + tileActions.Count + " actions)");
+            Expect(tileActions.Any(a => a.defaultLabel == "Edit tile"), "the selected tile's gizmos include Edit tile (" + tileActions.Count + " actions)");
 
             Mark("screenshot");
             Shot("sitepage");
@@ -1635,7 +2125,7 @@ namespace LP17Hotfix
             foreach (int x in Frames(60)) yield return x;
             Guard("unpatch DrawGizmoGridFor", () => sitePatch.Unpatch(drawGrid, HarmonyPatchType.Prefix, "local.lp17.probe.sitepage"));
             Expect(sitePageDraws > 0, "the world gizmo grid was drawn on the page (" + sitePageDraws + " draws)");
-            Expect(sitePageGizmoDrawn, "Set landmark reached DrawGizmoGridFor on the page");
+            Expect(sitePageGizmoDrawn, "Edit tile reached DrawGizmoGridFor on the page");
             Log.Message($"[PROBE] sitepage grid: last draw had {sitePageGizmos} gizmos, Command_Action labels: {sitePageLabels}");
         }
 
