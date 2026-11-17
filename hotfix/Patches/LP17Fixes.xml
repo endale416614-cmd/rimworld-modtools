@@ -121,4 +121,18 @@
 			</value>
 		</match>
 	</Operation>
+
+	<!-- genecategory-priority-480: Fairycore's FG_Wings and Lichenkin - Ecology Overhaul's Lichenkin_Kith both
+	     claim displayPriorityInXenotype 480, and the game logs a config error on each of them. Lichenkin loads after
+	     this mod, so the free slot is given to the wings category. Nothing else in the list uses 475. -->
+	<Operation Class="PatchOperationConditional">
+		<xpath>Defs/GeneCategoryDef[defName="FG_Wings"][displayPriorityInXenotype="480"]</xpath>
+		<match Class="PatchOperationReplace">
+			<xpath>Defs/GeneCategoryDef[defName="FG_Wings"]/displayPriorityInXenotype</xpath>
+			<value>
+				<displayPriorityInXenotype>475</displayPriorityInXenotype>
+			</value>
+		</match>
+	</Operation>
+
 </Patch>

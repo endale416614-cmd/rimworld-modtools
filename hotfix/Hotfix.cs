@@ -28,6 +28,7 @@ namespace LP17Hotfix
             PatchTargets.Apply(); // before LoadedModManager applies the XML patches
             CuisineRecipeRoles.Apply(); // same
             GppMarketValueCache.Apply(); // before the performance patch's callers are compiled with KeyOf inlined
+            GppXmlCacheOps.Apply(); // before LoadedModManager applies the XML patches, while the performance patch's op sets are still consulted
             BwmSettingsNoWorld.Apply(); // before Dub's Mint Menus reads its bill templates in its late-load action
             HideFlagsNoStub.Apply(); // before Dubs Performance Analyzer's GUI setup sets the flag
             YayoToolsCompat.Apply(); // before Show Me Your Tools patches at startup
@@ -91,7 +92,15 @@ namespace LP17Hotfix
             FlareShieldGenetron.Apply();
             DispenserAnimalToils.Apply();
             GearRowHiddenFirst.Apply();
+            HygieneDrawBeforeSections.Apply();
+            SnowWadeHumanlike.Apply();
+            HuntWithoutCastPosition.Apply();
+            UnmappedPawnJobs.Apply();
             CastSourceChain.Apply();
+            GrassMapComponentCache.Apply();
+            GrassConcealmentInterval.Apply();
+            FactionGearAmbiguousDamage.Apply();
+            RenderTreeAddChildDiag.Apply();
         }
     }
 
@@ -578,6 +587,64 @@ namespace LP17Hotfix
     }
 
 
+    static class RenderTreeAddChildDiag
+    {
+        // Diagnostic only. A portrait redraw throws a NullReferenceException inside PawnRenderTree.AddChild, and the
+        // stack frame cannot tell the Exosuit postfix from the vanilla body. Each finalizer records which one saw the
+        // exception and returns it unchanged, so nothing is swallowed.
+        static bool reported;
+
+        internal static void Apply() => Lp.Run("render-tree-addchild-diag", () =>
+        {
+            MethodInfo vanilla = AccessTools.Method(typeof(PawnRenderTree), "AddChild");
+            if (vanilla == null) return "AddChild not found";
+            Harmony h = new Harmony(Lp.Id);
+            h.Patch(vanilla, finalizer: new HarmonyMethod(typeof(RenderTreeAddChildDiag), nameof(VanillaFinalizer)));
+            MethodInfo exosuit = AccessTools.Method("Exosuit.PawnRenderTree_Apparel_Patch:AddChildEvenHasNullParentTag");
+            if (exosuit == null) { Lp.Note = "Exosuit postfix not found, vanilla only"; return null; }
+            try
+            {
+                h.Patch(exosuit, finalizer: new HarmonyMethod(typeof(RenderTreeAddChildDiag), nameof(ExosuitFinalizer)));
+                Lp.Note = "vanilla and Exosuit postfix";
+            }
+            catch (Exception e)
+            {
+                Lp.Note = "vanilla only, Exosuit postfix patch failed: " + e.GetType().Name;
+            }
+            return null;
+        });
+
+        static Exception VanillaFinalizer(Exception __exception, PawnRenderNode child, PawnRenderNode parent) => Report("vanilla AddChild", __exception, child, parent);
+
+        static Exception ExosuitFinalizer(Exception __exception, PawnRenderNode child, PawnRenderNode parent) => Report("Exosuit postfix", __exception, child, parent);
+
+        static Exception Report(string source, Exception e, PawnRenderNode child, PawnRenderNode parent)
+        {
+            if (e == null || reported) return e;
+            reported = true;
+            try
+            {
+                ThingDef def = child?.apparel?.def;
+                Log.Message("[LP17 Hotfix] render-tree-addchild-diag: " + source + " finalizer saw " + e.GetType().Name
+                    + "; child null=" + (child == null)
+                    + ", child.Props=" + (child == null ? "n/a" : child.Props == null ? "null" : "set")
+                    + ", child.Props.parentTagDef=" + (child?.Props == null ? "none" : DefName(child.Props.parentTagDef))
+                    + ", child.apparel.def=" + DefName(def)
+                    + ", child.apparel.def.apparel=" + (def == null ? "n/a" : def.apparel == null ? "null" : "set")
+                    + ", parent null=" + (parent == null)
+                    + ", parent.Props=" + (parent == null ? "n/a" : parent.Props == null ? "null" : "set")
+                    + ", parent.Props.tagDef=" + (parent?.Props == null ? "none" : DefName(parent.Props.tagDef))
+                    + ", node type=" + (child == null ? "null" : child.GetType().Name));
+            }
+            catch (Exception x)
+            {
+                Log.Message("[LP17 Hotfix] render-tree-addchild-diag: diagnostic itself failed: " + x.GetType().Name);
+            }
+            return e;
+        }
+
+        static string DefName(Def d) => d == null ? "none" : d.defName;
+    }
     static class IsekaiTileNotices
     {
         static readonly MethodInfo Warning = AccessTools.Method(typeof(Log), "Warning", new[] { typeof(string) });
@@ -1094,6 +1161,172 @@ namespace LP17Hotfix
         }
     }
 
+    static class UnmappedPawnJobs
+    {
+        // The game ticks a pawn's job tracker whenever the pawn is not a world pawn, without checking that it is on a map, and
+        // the think nodes it then runs read Pawn.MapHeld. One animal reached that state off the map: JobGiver_AnimalFlee,
+        // RestUtility.FindBedFor, JobGiver_ExitMap and JobDriver_Wait's own first toil all threw in the same tick, and the game
+        // gave up and left the pawn jobless. Such a pawn has nothing to decide until it is on a map again, so it is not ticked.
+        // Its job is left alone, because ending one runs cleanup that reads the map as well.
+        static bool reported;
+
+        internal static void Apply() => Lp.Run("unmapped-pawn-jobs", () =>
+        {
+            Harmony harmony = new Harmony(Lp.Id);
+            HarmonyMethod prefix = new HarmonyMethod(typeof(UnmappedPawnJobs), nameof(Prefix));
+            int patched = 0;
+            foreach (string name in new[] { "JobTrackerTick", "JobTrackerTickInterval" })
+            {
+                MethodInfo tick = AccessTools.Method(typeof(Verse.AI.Pawn_JobTracker), name);
+                if (tick == null) continue;
+                harmony.Patch(tick, prefix: prefix);
+                patched++;
+            }
+            if (patched == 0) return "no Pawn_JobTracker tick method found";
+            Lp.Note = patched + " tick methods";
+            return null;
+        });
+
+        static bool Prefix(Pawn ___pawn)
+        {
+            if (___pawn == null || ___pawn.MapHeld != null) return true;
+            if (!reported)
+            {
+                reported = true;
+                Log.Message("[LP17 Hotfix] unmapped-pawn-jobs: " + ___pawn.ToStringSafe() + " was job-ticked while off the map; its job ticks are skipped until it is on one.");
+            }
+            return false;
+        }
+    }
+
+    static class HygieneDrawBeforeSections
+    {
+        // Dubs Bad Hygiene refreshes its overlay sections from HygienePipeMapComp.FinalizeInit, through a static pass over every
+        // map's hygiene component. Map.mapDrawer builds its section array in an action queued for after FinalizeInit, so the map
+        // being generated has none yet and GridLayer.RefreshSections read a null array; the game logged that and the rest of the
+        // pass was skipped. The game's own MapDrawer.MapMeshDirty returns early on the same null. The dirty flag is left set
+        // here, so the refresh still happens on the first frame that draws the map.
+        //
+        // The pass only runs for two maps on one world tile, and a pocket map's tile is invalid, which reads as the same tile
+        // for all of them: entering a dungeon with another pocket map already open also merged their plumbing into one net.
+        // Pocket maps share no tile, so the pass is skipped for them.
+        static AccessTools.FieldRef<object, Map> gridMap;
+        static AccessTools.FieldRef<MapDrawer, Section[,]> drawerSections;
+
+        internal static void Apply() => Lp.Run("hygiene-draw-before-sections", () =>
+        {
+            MethodInfo refresh = AccessTools.Method("DubsBadHygiene.GridLayer:RefreshSections");
+            if (refresh == null) return "Dubs Bad Hygiene not loaded";
+            MethodInfo onTile = AccessTools.Method("DubsBadHygiene.HygienePipeMapComp:RefreshInternetsOnTile");
+            if (onTile == null) return "HygienePipeMapComp.RefreshInternetsOnTile not found";
+            gridMap = AccessTools.FieldRefAccess<Map>(refresh.DeclaringType, "map");
+            drawerSections = AccessTools.FieldRefAccess<MapDrawer, Section[,]>("sections");
+            Harmony harmony = new Harmony(Lp.Id);
+            harmony.Patch(refresh, prefix: new HarmonyMethod(typeof(HygieneDrawBeforeSections), nameof(RefreshPrefix)));
+            harmony.Patch(onTile, prefix: new HarmonyMethod(typeof(HygieneDrawBeforeSections), nameof(TilePrefix)));
+            return null;
+        });
+
+        // Runs for every visible section of every frame, so both field reads are cached delegates.
+        static bool RefreshPrefix(object __instance, ref bool __result)
+        {
+            Map map = gridMap(__instance);
+            if (map != null && map.mapDrawer != null && drawerSections(map.mapDrawer) != null) return true;
+            __result = false;
+            return false;
+        }
+
+        // The method is static, so its argument is read by position. Every real world tile is zero or above.
+        static bool TilePrefix(int __0) => __0 >= 0;
+    }
+
+    static class SnowWadeHumanlike
+    {
+        // Snow Perfected sizes its snow puffs from Pawn_AgeTracker.CurKindLifeStage and only then checks whether the pawn is
+        // humanlike; the game's own getter logs an error for a humanlike pawn. Such a pawn takes that method's 1f branch
+        // anyway, so the check runs first here.
+        internal static void Apply() => Lp.Run("snow-wade-humanlike", () =>
+        {
+            MethodInfo size = AccessTools.Method("DynamicSnow.SnowWade:Size");
+            if (size == null) return "Snow Perfected not loaded";
+            new Harmony(Lp.Id).Patch(size, prefix: new HarmonyMethod(typeof(SnowWadeHumanlike), nameof(Prefix)));
+            return null;
+        });
+
+        // Size is static, so its argument is read by position.
+        static bool Prefix(Pawn __0, ref float __result)
+        {
+            if (__0 == null || __0.RaceProps == null || !__0.RaceProps.Humanlike) return true;
+            __result = 1f;
+            return false;
+        }
+    }
+
+    static class HuntWithoutCastPosition
+    {
+        // WorkGiver_HunterHunt.HasJobOnThing proves a cast position exists before it offers the job, and
+        // Toils_Combat.GotoCastPosition searches again when the job starts. For some targets the two searches disagree, and
+        // then the toil ends the job as Incompletable and the work giver offers the same animal again in the same tick, until
+        // the game gives the pawn an error recovery job ("started 10 jobs in one tick"). A target the driver has just failed on
+        // is refused until it moves, which for an animal is almost at once, or until the search is worth repeating.
+        const int Forget = 2500; // about 40 seconds at normal speed: long enough for a pawn or a fire in the way to clear
+        static readonly Dictionary<long, Pair<IntVec3, int>> refused = new Dictionary<long, Pair<IntVec3, int>>();
+        static AccessTools.FieldRef<Verse.AI.Pawn_JobTracker, Pawn> trackerPawn;
+
+        internal static void Apply() => Lp.Run("hunt-without-cast-position", () =>
+        {
+            MethodInfo end = AccessTools.Method(typeof(Verse.AI.Pawn_JobTracker), nameof(Verse.AI.Pawn_JobTracker.EndCurrentJob));
+            if (end == null) return "Pawn_JobTracker.EndCurrentJob not found";
+            MethodInfo has = AccessTools.Method(typeof(RimWorld.WorkGiver_HunterHunt), nameof(RimWorld.WorkGiver_HunterHunt.HasJobOnThing));
+            if (has == null) return "WorkGiver_HunterHunt.HasJobOnThing not found";
+            string wrong = SelfCheck();
+            if (wrong != null) return wrong;
+            trackerPawn = AccessTools.FieldRefAccess<Verse.AI.Pawn_JobTracker, Pawn>("pawn");
+            Harmony harmony = new Harmony(Lp.Id);
+            harmony.Patch(end, prefix: new HarmonyMethod(typeof(HuntWithoutCastPosition), nameof(EndPrefix)));
+            harmony.Patch(has, postfix: new HarmonyMethod(typeof(HuntWithoutCastPosition), nameof(HasPostfix)));
+            return null;
+        });
+
+        static long Key(int hunter, int victim) => ((long)hunter << 32) | (uint)victim;
+
+        static bool StillRefused(IntVec3 at, Pair<IntVec3, int> failed, int now) => failed.First == at && now - failed.Second < Forget;
+
+        // The key packs two thing ids into one long, and an entry expires when the target moves or when it is old enough, so
+        // both are checked here rather than in a game.
+        static string SelfCheck()
+        {
+            if (Key(1, 2) == Key(2, 1) || Key(3, 4) == Key(3, 5) || Key(4, 3) == Key(5, 3)) return "key packing collides";
+            IntVec3 cell = new IntVec3(10, 0, 20), moved = new IntVec3(11, 0, 20);
+            Pair<IntVec3, int> failed = new Pair<IntVec3, int>(cell, 1000);
+            if (!StillRefused(cell, failed, 1000 + Forget - 1)) return "a target that has not moved was let through";
+            if (StillRefused(cell, failed, 1000 + Forget)) return "a stale refusal was kept";
+            if (StillRefused(moved, failed, 1000)) return "a target that moved was still refused";
+            return null;
+        }
+
+        static void EndPrefix(Verse.AI.Pawn_JobTracker __instance, Verse.AI.JobCondition condition)
+        {
+            if (condition != Verse.AI.JobCondition.Incompletable) return;
+            Verse.AI.Job job = __instance.curJob;
+            if (job == null || job.def != RimWorld.JobDefOf.Hunt) return;
+            Pawn hunter = trackerPawn(__instance);
+            Thing victim = job.targetA.Thing;
+            if (hunter == null || victim == null || !victim.Spawned) return;
+            if (refused.Count > 256) refused.Clear(); // only ever holds recent failures, and a stale entry clears on first use
+            refused[Key(hunter.thingIDNumber, victim.thingIDNumber)] = new Pair<IntVec3, int>(victim.Position, Find.TickManager.TicksGame);
+        }
+
+        static void HasPostfix(Pawn pawn, Thing t, ref bool __result)
+        {
+            if (!__result) return;
+            long key = Key(pawn.thingIDNumber, t.thingIDNumber);
+            if (!refused.TryGetValue(key, out Pair<IntVec3, int> failed)) return;
+            if (StillRefused(t.Position, failed, Find.TickManager.TicksGame)) { __result = false; return; }
+            refused.Remove(key);
+        }
+    }
+
     static class CastSourceChain
     {
         // VFE Deserters and Vanilla Gravship Expanded each replace Thing.DrawPos in TryCastShot and DrawAimPie with their own
@@ -1136,6 +1369,88 @@ namespace LP17Hotfix
 
         // The gravship helper returns DrawPos for anything that is not a gravship turret.
         internal static Vector3 Either(Thing thing) => barrelsType.IsInstanceOfType(thing) ? barrelsSource(thing) : gravshipSource(thing);
+    }
+
+    static class GrassMapComponentCache
+    {
+        // Tall Grass: Hidden Danger reaches its own map components through Map.GetComponent on every call, including the
+        // postfix that runs for every Plant.Graphic read: 302,986 of those in one 3600-tick measurement, 267 ms of it.
+        // The vanilla getter walks the map's component list with a type test per entry, and a long mod list makes that
+        // list long (171 component types in the save this was measured on), so the lookup costs more than the work it
+        // leads to. Each call is pointed at a one-entry memo per component type, which hands back the same instance.
+        static int replaced;
+
+        internal static void Apply() => Lp.Run("grass-mapcomponent-cache", () =>
+        {
+            if (AccessTools.TypeByName("TallGrass.Concealment") == null) return "Tall Grass not loaded";
+            Harmony harmony = new Harmony(Lp.Id);
+            HarmonyMethod transpiler = new HarmonyMethod(typeof(GrassMapComponentCache), nameof(Transpiler));
+            List<string> counts = new List<string>();
+            // The methods the lookup was measured in, heaviest first. The others call it a handful of times a day.
+            foreach (string name in new[] { "TallGrass.GrassGraphicPatch:Postfix", "TallGrass.Concealment:IsConcealed", "TallGrass.GrassGrowthPatch:Postfix", "TallGrass.GrassEcology:ProcessCell", "TallGrass.FootTrafficPatch:Postfix" })
+            {
+                string label = name.Substring(name.IndexOf('.') + 1);
+                MethodInfo target = AccessTools.Method(name);
+                if (target == null) { counts.Add(label + " missing"); continue; }
+                int before = replaced;
+                harmony.Patch(target, transpiler: transpiler);
+                counts.Add(label + " " + (replaced - before));
+            }
+            if (replaced == 0) return "none of those methods calls Map.GetComponent any more";
+            Lp.Note = string.Join(", ", counts);
+            return null;
+        });
+
+        static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> code)
+        {
+            foreach (CodeInstruction ins in code)
+            {
+                if (ins.operand is MethodInfo called && called.IsGenericMethod && called.DeclaringType == typeof(Map) && called.Name == nameof(Map.GetComponent))
+                {
+                    ins.opcode = OpCodes.Call;
+                    ins.operand = AccessTools.Method(typeof(Cache<>).MakeGenericType(called.GetGenericArguments()[0]), nameof(Cache<MapComponent>.Of));
+                    replaced++;
+                }
+                yield return ins;
+            }
+        }
+
+        internal static class Cache<T> where T : MapComponent
+        {
+            static T held;
+
+            // The field is read once, so an instance whose own map matches is the right one even while another thread
+            // replaces it. A null is never kept: the component can be missing while the map is still being set up.
+            internal static T Of(Map map)
+            {
+                T c = held;
+                if (c != null && c.map == map) return c;
+                c = map.GetComponent<T>(); // throws on a null map exactly as the call it replaces did
+                if (c != null) held = c;
+                return c;
+            }
+        }
+    }
+
+    static class GrassConcealmentInterval
+    {
+        // Tall Grass's map component walks every spawned pawn on every tick to deselect concealed hostiles, drop them as
+        // enemy targets and interrupt attacks aimed at them: 63 us a tick with 102 pawns, with its component lookups
+        // already cached. The pass runs once every 15 ticks instead, so a reaction can be up to 14 ticks late, a quarter
+        // second at normal speed. The interval must divide 120: the same method's second half prunes stale grass
+        // disturbances behind a TicksGame % 120 check, and an interval that missed those ticks would stop it running.
+        // It cannot be offset per map for the same reason, so every map still makes its pass on the same tick.
+        const int Interval = 15;
+
+        internal static void Apply() => Lp.Run("grass-concealment-interval", () =>
+        {
+            MethodInfo tick = AccessTools.Method("TallGrass.GrassMapComponent:MapComponentTick");
+            if (tick == null) return "Tall Grass not loaded";
+            new Harmony(Lp.Id).Patch(tick, prefix: new HarmonyMethod(typeof(GrassConcealmentInterval), nameof(Prefix)));
+            return null;
+        });
+
+        static bool Prefix() => Find.TickManager.TicksGame % Interval == 0;
     }
 
     static class Lp
