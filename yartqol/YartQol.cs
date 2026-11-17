@@ -71,7 +71,10 @@ namespace YartQol
             foreach (ResearchNode node in ResearchGraph.Instance.AllNodes.Values)
             {
                 ResearchProjectDef def = node.Def;
-                if (node.Channel == channel && def.CanStartNow && !Gravtech(def) && (best == null || def.CostApparent < best.CostApparent)) best = def;
+                // Cost before CanStartNow: that getter scans every colonist building for an appropriate bench, and a node no
+                // cheaper than the best startable one so far cannot win whatever it answers. Ties still go to the first node.
+                if (node.Channel != channel || (best != null && def.CostApparent >= best.CostApparent)) continue;
+                if (def.CanStartNow && !Gravtech(def)) best = def;
             }
             return best;
         }
